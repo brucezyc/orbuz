@@ -11,6 +11,8 @@
 
 ---
 
+> **⚠️ Under active development.** The framework is functional — you can run end-to-end workflows in mock or real mode — but APIs and agent definitions may change. Feedback and contributions welcome.
+
 orbuz takes a research topic, automatically decomposes it into stages, dispatches specialized agents, and synthesizes the results into a structured deliverable. It uses your own LLM API key — no hosted service, no vendor lock-in.
 
 ## Quickstart
