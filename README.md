@@ -2,7 +2,7 @@
   <h1 align="center">orbuz</h1>
   <p align="center"><strong>Agent orchestration workflow engine for multi-agent research and synthesis.</strong></p>
   <p align="center">
-    <code>orbuz run "topic" --quality-model gpt-4o --api-key sk-xxx</code>
+    <code>orbuz run "topic" --quality-model opus-4.8 --api-key sk-xxx</code>
   </p>
   <p align="center">
     <a href="#quickstart">Quickstart</a> · <a href="#how-it-works">How it Works</a> · <a href="#cli-reference">CLI</a> · <a href="#agent-library">Agents</a>
@@ -20,14 +20,14 @@ orbuz takes a research topic, automatically decomposes it into stages, dispatche
 ```bash
 pip install orbuz-agent-workflow
 
-# Set your API key
+# Set your API key(s) — each tier can use a different provider
 export OPENAI_API_KEY="sk-..."
 
 # Run a research workflow
 orbuz run "Impact of BIS export controls on AI chip supply chains" \
-  --quality-model gpt-4o \
-  --balanced-model gpt-4o-mini \
-  --cheap-model gpt-4o-mini
+  --quality-model claude-opus-4-20250514 \
+  --balanced-model claude-sonnet-4-20250514 \
+  --cheap-model claude-sonnet-4-20250514
 ```
 
 The workflow will:
@@ -38,20 +38,31 @@ The workflow will:
 
 > **No API key?** orbuz runs in mock mode — skip `--api-key` to preview the full flow with placeholder output.
 
-**Custom API endpoints:**
+**Per-tier providers:**
+
+Each model tier can use a different provider. Set per-tier API keys and bases via environment variables, or use a single key for all:
 
 ```bash
-# DeepSeek, Together, Groq, vLLM, Ollama — any OpenAI-compatible API
-export OPENAI_API_BASE="https://api.deepseek.com/v1"
-orbuz run "..." --quality-model deepseek-chat --balanced-model deepseek-chat --cheap-model deepseek-chat
+# Example: quality via Anthropic, balanced/cheap via DeepSeek
+export ORBUZ_API_KEY_QUALITY="sk-ant-..."
+export ORBUZ_API_BASE_QUALITY="https://api.anthropic.com/v1"
+export ORBUZ_API_KEY_BALANCED="sk-ds-..."
+export ORBUZ_API_BASE_BALANCED="https://api.deepseek.com/v1"
+
+orbuz run "..." \
+  --quality-model claude-opus-4-20250514 \
+  --balanced-model deepseek-chat \
+  --cheap-model deepseek-chat
 ```
+
+Fallback: `ORBUZ_API_KEY_<TIER>` → `OPENAI_API_KEY` → `--api-key`. Same chain for `_BASE`.
 
 ## How It Works
 
 ```
 ┌────────────────────────────────────────────────────┐
 │                    orbuz CLI                       │
-│  orbuz run "topic" --quality-model gpt-4o ...      │
+│  orbuz run "topic" --quality-model opus-4.8 ...    │
 └──────────────┬─────────────────────────────────────┘
                │
                ▼
@@ -106,10 +117,10 @@ orbuz run "..." --quality-model deepseek-chat --balanced-model deepseek-chat --c
 | `--quality-model` | required | Orchestrator and synthesis model |
 | `--balanced-model` | required | Default execution model |
 | `--cheap-model` | required | Information gathering model |
-| `--api-key` | `OPENAI_API_KEY` | API key |
-| `--api-base` | `OPENAI_API_BASE` | API endpoint URL |
-| `--workflow-name` | auto | Name for this run |
-| `--agent-dir` | `./agents/` | Custom agent library directory |
+| `--api-key` | `OPENAI_API_KEY` | API key (fallback for all tiers) |
+| `--api-base` | `OPENAI_API_BASE` | API endpoint URL (fallback for all tiers) |
+
+Per-tier key/base override via environment variables: `ORBUZ_API_KEY_QUALITY`, `ORBUZ_API_BASE_QUALITY`, `ORBUZ_API_KEY_BALANCED`, etc.
 
 ## Agent Library
 
@@ -125,13 +136,21 @@ Each agent is defined as a YAML file in `agents/` with its own system prompt, ou
 
 | Variable | Description |
 |----------|-------------|
-| `OPENAI_API_KEY` | API key (also accepts `--api-key`) |
-| `OPENAI_API_BASE` | API base URL, default `https://api.openai.com/v1` |
+| `OPENAI_API_KEY` | Global fallback API key |
+| `OPENAI_API_BASE` | Global fallback API base URL |
+| `ORBUZ_API_KEY_QUALITY` | Per-tier key for quality model |
+| `ORBUZ_API_BASE_QUALITY` | Per-tier base for quality model |
+| `ORBUZ_API_KEY_BALANCED` | Per-tier key for balanced model |
+| `ORBUZ_API_BASE_BALANCED` | Per-tier base for balanced model |
+| `ORBUZ_API_KEY_CHEAP` | Per-tier key for cheap model |
+| `ORBUZ_API_BASE_CHEAP` | Per-tier base for cheap model |
+
+Resolution order: `ORBUZ_API_KEY_<TIER>` → `OPENAI_API_KEY` → `--api-key`
 
 ## Requirements
 
 - Python 3.10+
-- An LLM API key (OpenAI, DeepSeek, or any OpenAI-compatible provider)
+- An LLM API key (OpenAI, Anthropic, DeepSeek, or any OpenAI-compatible provider)
 
 ## License
 
