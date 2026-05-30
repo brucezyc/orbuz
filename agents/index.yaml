@@ -1,0 +1,99 @@
+# Agent Registry Index
+# Orchestrator uses summary and tags for matching decisions
+# Update this file when adding new agents
+
+agents:
+  # ── Research / Analysis ──
+
+  - name: deep-researcher
+    summary: "General multi-step research: decompose question → multi-angle search → cross-validate → synthesize report"
+    tags: [research, web-search, synthesis, general]
+    file: deep-researcher.yaml
+
+  - name: official-researcher
+    summary: "Search official/regulatory/corporate announcements only, prefer primary sources"
+    tags: [search, policy, official, government]
+    file: official-researcher.yaml
+
+  - name: media-researcher
+    summary: "Search media/investment bank/market commentary, multi-source cross-verification"
+    tags: [search, media, market, news]
+    file: media-researcher.yaml
+
+  - name: background-researcher
+    summary: "Search technical/competitive/academic background, signals of landscape change"
+    tags: [search, technology, academic, background]
+    file: background-researcher.yaml
+
+  - name: fact-checker
+    summary: "Fact-checking: extract claims → multi-source verify → rate each (Verified/Partially True/Misleading/False)"
+    tags: [verification, fact-check, accuracy]
+    file: fact-checker.yaml
+
+  - name: competitive-intel
+    summary: "Competitive analysis: company profile → comparison table → SWOT → trends → action recommendations"
+    tags: [competitive-analysis, market-research, industry]
+    file: competitive-intel.yaml
+
+  - name: paper-analyst
+    summary: "Academic paper analysis: methods → results → innovations → limitations → reproducibility suggestions"
+    tags: [academic, paper, literature-review]
+    file: paper-analyst.yaml
+
+  # ── Code / Development ──
+
+  - name: code-reviewer
+    summary: "Code review: line-by-line check for bugs/security/performance/style/architecture, with fix suggestions and severity"
+    tags: [code-review, quality, security, pr]
+    file: code-reviewer.yaml
+
+  - name: test-writer
+    summary: "Test writing: generate unit/integration tests from code logic, covering edge cases and error paths"
+    tags: [testing, quality, unit-test]
+    file: test-writer.yaml
+
+  - name: debugger
+    summary: "System debugging: analyze errors → root cause → fix recommendations → validation plan"
+    tags: [debugging, bug-fix, troubleshooting]
+    file: debugger.yaml
+
+  - name: documentation-writer
+    summary: "Technical documentation: extract structure from code/API → write clear docs → include examples and usage instructions"
+    tags: [documentation, writing, technical]
+    file: documentation-writer.yaml
+
+  - name: security-auditor
+    summary: "Security audit: OWASP Top 10 checks for injection/XSS/auth/key leaks/misconfigurations"
+    tags: [security, audit, vulnerability]
+    file: security-auditor.yaml
+
+  # ── Content / Writing ──
+
+  - name: writer
+    summary: "Long-form writing: research → outline → draft → revision, adapting tone and audience"
+    tags: [writing, content, article, blog]
+    file: writer.yaml
+
+  - name: editor
+    summary: "Content editing: hierarchical review of structure → content → wording → grammar → typos, preserving author's voice"
+    tags: [editing, proofreading, style, grammar]
+    file: editor.yaml
+
+  # ── Data / Analytics ──
+
+  - name: data-analyst
+    summary: "Data analysis: understand data → exploratory analysis → visualization → key findings report"
+    tags: [data, analysis, statistics, sql]
+    file: data-analyst.yaml
+
+  # ── Merge / Synthesis ──
+
+  - name: merge-agent
+    summary: "Merge multiple independent outputs, find commonalities/contradictions/gaps"
+    tags: [merge, synthesis, combine]
+    file: merge-agent.yaml
+
+  - name: synthesizer
+    summary: "Synthesize research output into a readable report"
+    tags: [report, synthesis, writing]
+    file: synthesizer.yaml

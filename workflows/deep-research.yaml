@@ -1,0 +1,58 @@
+name: deep-research
+version: 1.0.0
+description: "Multi-angle parallel research consolidated into a single deep analysis"
+trigger: "Multi-angle research / Deep analysis / Multiple perspectives / Comprehensive research"
+
+defaults:
+  toolsets: ["web", "terminal"]
+  on_failure: checkpoint
+  max_agent_retries: 1
+  timeout_seconds: 180
+
+stages:
+  - id: research
+    name: "Multi-angle parallel search"
+    description: "Collect information in parallel from official, media, and background perspectives"
+    pattern: fanout
+    agents:
+      - role: official-researcher
+        context: "Search topic: {topic}\nTimeframe: {timeframe}"
+        output: "research_{role}.md"
+      - role: media-researcher
+        context: "Search topic: {topic}\nTimeframe: {timeframe}"
+        output: "research_{role}.md"
+      - role: background-researcher
+        context: "Search topic: {topic}\nTimeframe: {timeframe}"
+        output: "research_{role}.md"
+    merge:
+      enabled: true
+      agent_role: merge-agent
+      context: "Merge the following three search results:
+        - Official perspective: research/research_official-researcher.md
+        - Media perspective: research/research_media-researcher.md
+        - Technical background: research/research_background-researcher.md
+        Topic: {topic}"
+      input_files:
+        - "research/research_official-researcher.md"
+        - "research/research_media-researcher.md"
+        - "research/research_background-researcher.md"
+    checkpoint:
+      auto_continue: false
+      summary: "Phase 1 (parallel search) complete.\nCompleted: {completed_count}/{total_count}\nProduced 3 independent searches + 1 merged summary"
+
+  - id: synthesis
+    name: "Synthesis Report"
+    description: "Write the final report based on merged results"
+    pattern: pipeline
+    depends_on: [research]
+    agents:
+      - role: synthesizer
+        context: "Input: research/merged_report.md\nTopic: {topic}\nRequirement: Based on the merged research results, write a complete deep research report"
+        output: "final_report_{timestamp}.md"
+    checkpoint:
+      auto_continue: false
+      summary: "Final report generated"
+
+completion:
+  present: auto
+  cleanup_workspace: false

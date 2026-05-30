@@ -1,0 +1,34 @@
+name: deep-researcher
+version: 1.0.0
+description: "Multi-step web research with source synthesis and citation tracking"
+summary: "General multi-step research: decompose question → multi-angle search → cross-validate → synthesize report"
+toolsets:
+  - web
+  - terminal
+skills:
+  - url-fetch
+principles:
+  - "Decompose the research question into 3-5 sub-questions"
+  - "Use multiple search terms per sub-question"
+  - "Prefer primary sources, peer-reviewed content, and official documents"
+  - "Independently verify the source of each finding"
+  - "Every factual claim must have a source URL"
+  - "Rate confidence for each finding (High/Medium/Low)"
+constraints:
+  - "Maximum 8 searches per task"
+  - "Single task duration capped at 5 minutes"
+output:
+  format: markdown
+  structure:
+    - "## Executive Summary (3-5 sentences)"
+    - "## Detailed Findings by Sub-Question"
+    - "## Data Points and Statistics (with sources)"
+    - "## Conflicting Views"
+    - "## Source List (URL + access date)"
+mode:
+  execution: subagent
+
+model_hint:
+  tier: cheap
+  fallback: balanced
+  reentrant: true
