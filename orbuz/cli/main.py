@@ -30,6 +30,12 @@ def main():
     run.add_argument("--cheap-model", required=True, help="Model for information gathering")
     run.add_argument("--api-key", help="LLM API key (or set OPENAI_API_KEY env var)")
     run.add_argument("--api-base", default=None, help="API base URL (default https://api.openai.com/v1, or set OPENAI_API_BASE env var)")
+    run.add_argument("--quality-api-key", help="Per-tier API key for quality model (overrides --api-key, or set ORBUZ_API_KEY_QUALITY)")
+    run.add_argument("--quality-api-base", help="Per-tier API base for quality model (overrides --api-base, or set ORBUZ_API_BASE_QUALITY)")
+    run.add_argument("--balanced-api-key", help="Per-tier API key for balanced model (or set ORBUZ_API_KEY_BALANCED)")
+    run.add_argument("--balanced-api-base", help="Per-tier API base for balanced model (or set ORBUZ_API_BASE_BALANCED)")
+    run.add_argument("--cheap-api-key", help="Per-tier API key for cheap model (or set ORBUZ_API_KEY_CHEAP)")
+    run.add_argument("--cheap-api-base", help="Per-tier API base for cheap model (or set ORBUZ_API_BASE_CHEAP)")
     run.add_argument("--workflow-name", default=None, help="Workflow name (default: auto)")
     run.add_argument("--agent-dir", default=None, help="Agent YAML directory")
 
@@ -38,6 +44,7 @@ def main():
 
     # orbuz stop
     stop = sub.add_parser("stop", help="Abort a run")
+    stop.add_argument("--run-id", default=None, help="Specific run ID (default: current)")
 
     # orbuz agents
     agents = sub.add_parser("agents", help="Manage agent library")
@@ -70,9 +77,30 @@ def _cmd_run(args):
         "balanced": args.balanced_model,
         "cheap": args.cheap_model,
     }
+    # Build per-tier config
+    tier_config = {}
+    for tier in ("quality", "balanced", "cheap"):
+        cfg = {}
+        k = getattr(args, f"{tier}_api_key", None)
+        b = getattr(args, f"{tier}_api_base", None)
+        if k:
+            cfg["api_key"] = k
+        if b:
+            cfg["api_base"] = b
+        if cfg:
+            tier_config[tier] = cfg
+
+    # Determine mock mode: mock if no global key AND no per-tier key
+    has_global_key = bool(args.api_key or os.environ.get("OPENAI_API_KEY", ""))
+    has_tier_key = any(
+        tc.get("api_key") or os.environ.get(f"ORBUZ_API_KEY_{t.upper()}", "")
+        for t, tc in tier_config.items()
+    ) if tier_config else False
+
     llm = LLMClient(models, api_key=args.api_key,
                     api_base=args.api_base,
-                    mock=not bool(args.api_key or os.environ.get("OPENAI_API_KEY", "")))
+                    tier_config=tier_config if tier_config else None,
+                    mock=not (has_global_key or has_tier_key))
 
     if llm.mock:
         print("  🟡 Mock mode: no API key provided, output is placeholder text")

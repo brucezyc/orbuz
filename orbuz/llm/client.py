@@ -5,10 +5,19 @@ All LLM calls go through this interface.
 Currently in mock mode (returns placeholder text);
 provide an API key to switch to real calls.
 
+Supports per-tier API keys and base URLs for quality/balanced/cheap tiers,
+each potentially from a different provider.
+
 Usage:
     client = LLMClient({"cheap": "flash", "balanced": "gpt4", "quality": "sonnet"})
-    resp = client.chat("gpt4", system="...", messages=[...])
-    
+    resp = client.chat("quality", system="...", messages=[...])
+
+    With per-tier keys:
+    client = LLMClient(models, tier_config={
+        "quality": {"api_key": "sk-ant-...", "api_base": "https://api.anthropic.com/v1"},
+        "balanced": {"api_key": "sk-ds-...", "api_base": "https://api.deepseek.com/v1"},
+    })
+
     To run in mock mode only (no API):
     client = LLMClient({}, mock=True)
 """
@@ -39,7 +48,7 @@ class LLMResponse:
 
 class LLMClient:
     """
-    Model call client.
+    Model call client with per-tier API key/base support.
 
     models = {
         "cheap": "gemini-2.0-flash",
@@ -47,25 +56,72 @@ class LLMClient:
         "quality": "claude-sonnet-4",
     }
 
-    If no model_map is provided or mock=True, uses mock mode.
+    Per-tier resolution order (for each tier):
+      1. tier_config[tier]["api_key"] (from --quality-api-key etc.)
+      2. ORBUZ_API_KEY_<TIER> env var (e.g. ORBUZ_API_KEY_QUALITY)
+      3. Global api_key (from --api-key or OPENAI_API_KEY)
+
+    Same chain for api_base.
     """
+
+    TIERS = ("quality", "balanced", "cheap")
 
     def __init__(self, models: dict[str, str] | None = None,
                  api_key: str | None = None,
                  api_base: str | None = None,
+                 tier_config: dict[str, dict] | None = None,
                  mock: bool = False):
         self.models = models or {}
-        # API key priority: argument > environment variable
-        self.api_key = api_key or os.environ.get("OPENAI_API_KEY", "")
-        self.api_base = (api_base or os.environ.get("OPENAI_API_BASE", "")
-                         or "https://api.openai.com/v1")
+        self.tier_config = tier_config or {}
+
+        # Global fallbacks
+        self._global_key = api_key or os.environ.get("OPENAI_API_KEY", "")
+        self._global_base = (api_base or os.environ.get("OPENAI_API_BASE", "")
+                             or "https://api.openai.com/v1")
+
+        # Pre-resolve per-tier keys/bases
+        self._tier_keys: dict[str, str] = {}
+        self._tier_bases: dict[str, str] = {}
+        for tier in self.TIERS:
+            self._tier_keys[tier] = self._resolve_key(tier)
+            self._tier_bases[tier] = self._resolve_base(tier)
+
         self.mock = mock
-        # If at least one real model name + key is present → use real mode
-        if not self.mock and bool(self.models) and bool(self.api_key):
+        # If at least one real model + a key for any tier → use real mode
+        has_any_key = any(self._tier_keys.values())
+        if not self.mock and bool(self.models) and has_any_key:
             self.mock = False
         else:
             self.mock = True
         self._call_count = 0
+
+    def _resolve_key(self, tier: str) -> str:
+        """Resolve API key for a tier: tier_config → env var → global"""
+        tc = self.tier_config.get(tier, {})
+        if tc.get("api_key"):
+            return tc["api_key"]
+        env_key = os.environ.get(f"ORBUZ_API_KEY_{tier.upper()}", "")
+        if env_key:
+            return env_key
+        return self._global_key
+
+    def _resolve_base(self, tier: str) -> str:
+        """Resolve API base for a tier: tier_config → env var → global → default"""
+        tc = self.tier_config.get(tier, {})
+        if tc.get("api_base"):
+            return tc["api_base"]
+        env_base = os.environ.get(f"ORBUZ_API_BASE_{tier.upper()}", "")
+        if env_base:
+            return env_base
+        return self._global_base
+
+    def get_key(self, tier: str) -> str:
+        """Get the resolved API key for a tier"""
+        return self._tier_keys.get(tier, self._global_key)
+
+    def get_base(self, tier: str) -> str:
+        """Get the resolved API base URL for a tier"""
+        return self._tier_bases.get(tier, self._global_base)
 
     # ── Public interface ──
 
@@ -88,8 +144,11 @@ class LLMClient:
         if self.mock:
             return self._mock_call(model_name, system, messages)
 
-        # Real call (waiting for specific API integration)
-        return self._real_call(model_name, system, messages, temperature, max_tokens)
+        api_key = self.get_key(model_tier)
+        api_base = self.get_base(model_tier)
+        return self._real_call(model_name, system, messages,
+                               temperature, max_tokens,
+                               api_key=api_key, api_base=api_base)
 
     def get_model_name(self, tier: str) -> str:
         """Return the actual model name for a given tier"""
@@ -144,23 +203,25 @@ class LLMClient:
             duration_s=0.5,
         )
 
-    # ── Real call adapter ──
+    # ── Real call ──
 
     def _real_call(self, model: str, system: str,
                    messages: list[dict] | None,
                    temperature: float,
-                   max_tokens: int) -> LLMResponse:
+                   max_tokens: int,
+                   api_key: str = "",
+                   api_base: str = "") -> LLMResponse:
         """
         Real LLM API call (OpenAI-compatible format).
 
         Supports: OpenAI, DeepSeek, vLLM, Ollama, Together AI, Groq, Fireworks, etc.
         Anthropic also works via proxies like api.convex.dev that adopt this format.
 
-        Environment variables:
-            OPENAI_API_KEY   — API key
-            OPENAI_API_BASE  — Custom endpoint (default: https://api.openai.com/v1)
+        api_key and api_base are resolved per-tier by chat() and passed in.
         """
-        url = f"{self.api_base.rstrip('/')}/chat/completions"
+        base = api_base or self._global_base
+        key = api_key or self._global_key
+        url = f"{base.rstrip('/')}/chat/completions"
 
         # Build message array
         msgs = [{"role": "system", "content": system}]
@@ -181,7 +242,7 @@ class LLMClient:
             data=json.dumps(body, ensure_ascii=False).encode("utf-8"),
             headers={
                 "Content-Type": "application/json",
-                "Authorization": f"Bearer {self.api_key}",
+                "Authorization": f"Bearer {key}",
             },
         )
 
@@ -222,6 +283,7 @@ class LLMClient:
 def create_llm_client(models: dict[str, str] | None = None,
                       api_key: str | None = None,
                       api_base: str | None = None,
+                      tier_config: dict[str, dict] | None = None,
                       provider: str = "auto") -> LLMClient:
     """Factory function: create a client by provider"""
     if provider == "mock":
@@ -230,7 +292,14 @@ def create_llm_client(models: dict[str, str] | None = None,
     base = api_base or os.environ.get("OPENAI_API_BASE", "")
     has_models = bool(models) if models else False
     if has_models and key:
-        return LLMClient(models=models, api_key=key, api_base=base)
+        return LLMClient(models=models, api_key=key, api_base=base,
+                         tier_config=tier_config)
+    # If no global key but per-tier keys exist
+    if has_models and tier_config and any(
+        tc.get("api_key") for tc in tier_config.values()
+    ):
+        return LLMClient(models=models, api_key=key, api_base=base,
+                         tier_config=tier_config)
     return LLMClient(mock=True)
 
 

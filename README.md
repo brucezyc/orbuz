@@ -2,7 +2,7 @@
   <h1 align="center">orbuz</h1>
   <p align="center"><strong>Agent orchestration workflow engine for multi-agent research and synthesis.</strong></p>
   <p align="center">
-    <code>orbuz run "topic" --quality-model opus-4.8 --api-key sk-xxx</code>
+    <code>orbuz run "topic" --quality-model claude-opus-4.8 --api-key sk-xxx</code>
   </p>
   <p align="center">
     <a href="#quickstart">Quickstart</a> · <a href="#how-it-works">How it Works</a> · <a href="#cli-reference">CLI</a> · <a href="#agent-library">Agents</a>
@@ -25,9 +25,9 @@ export OPENAI_API_KEY="sk-..."
 
 # Run a research workflow
 orbuz run "Impact of BIS export controls on AI chip supply chains" \
-  --quality-model claude-opus-4-20250514 \
-  --balanced-model claude-sonnet-4-20250514 \
-  --cheap-model claude-sonnet-4-20250514
+  --quality-model claude-opus-4.8 \
+  --balanced-model claude-sonnet-4.6 \
+  --cheap-model claude-sonnet-4.6
 ```
 
 The workflow will:
@@ -50,7 +50,7 @@ export ORBUZ_API_KEY_BALANCED="sk-ds-..."
 export ORBUZ_API_BASE_BALANCED="https://api.deepseek.com/v1"
 
 orbuz run "..." \
-  --quality-model claude-opus-4-20250514 \
+  --quality-model claude-opus-4.8 \
   --balanced-model deepseek-chat \
   --cheap-model deepseek-chat
 ```
