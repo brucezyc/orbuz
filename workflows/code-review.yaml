@@ -1,0 +1,55 @@
+# orbuz Workflow: Code Review
+# Compound Engineering-style: tiered persona selection → parallel dispatch → merge-dedup → synthesis
+#
+# Usage:
+#   orbuz run "Review current branch" --workflow code-review --quality-model claude-sonnet-4 ...
+#   orbuz run "Review PR #42" --workflow code-review --quality-model claude-sonnet-4 ...
+
+name: code-review
+version: "1.0"
+description: >
+  Multi-agent code review using tiered persona selection. Selects reviewer personas
+  based on diff analysis (always-on + cross-cutting + stack-specific), dispatches
+  them in parallel, merges deduplicated findings, and produces a structured report.
+
+trigger:
+  command: "orbuz run <topic> --workflow code-review"
+  when: "User wants to review code changes before merging"
+
+stages:
+  - id: "01_scope"
+    name: "Determine review scope"
+    pattern: "pipeline"
+    agents:
+      - role: "deep-researcher"
+        goal: "Analyze the codebase to determine the scope of changes"
+        model_assignment:
+          tier: "cheap"
+    checkpoint:
+      auto_continue: true
+
+  - id: "02_review"
+    name: "Multi-agent code review"
+    pattern: "code_review"
+    base: "main"
+    goal: "Review code changes for bugs, security, performance, and maintainability issues. Return findings as structured JSON."
+    # Agents are auto-selected by selector.py based on diff content.
+    # Add explicit review_agents to override auto-selection:
+    # review_agents:
+    #   - ce-correctness-reviewer
+    #   - ce-security-reviewer
+    checkpoint:
+      auto_continue: false
+    merge:
+      enabled: true
+      agent_role: "merge-agent"
+
+  - id: "03_synthesis"
+    name: "Synthesize review report"
+    pattern: "pipeline"
+    depends_on: ["02_review"]
+    agents:
+      - role: "synthesizer"
+        goal: "Synthesize the merged review findings into a readable report with actionable recommendations"
+        model_assignment:
+          tier: "quality"
