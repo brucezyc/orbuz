@@ -219,8 +219,8 @@ orbuz run "Review auth refactor" --workflow code-review --agent-dir agents
 | `--quality-model` | required | Orchestrator and synthesis model |
 | `--balanced-model` | required | Default execution model |
 | `--cheap-model` | required | Information gathering model |
-| `--api-key` | `OPENAI_API_KEY` | API key (fallback for all tiers) |
-| `--api-base` | `OPENAI_API_BASE` | API endpoint URL |
+| `--api-key` | `ANTHROPIC_API_KEY` or `DEEPSEEK_API_KEY` | API key (fallback for all tiers) |
+| `--api-base` | `ANTHROPIC_API_BASE` or `DEEPSEEK_API_BASE` | API endpoint URL |
 | `--workflow-name` | auto | Workflow to execute |
 | `--agent-dir` | `./agents/` | Custom agent directory |
 
@@ -230,19 +230,19 @@ Per-tier key/base via environment variables: `ORBUZ_API_KEY_QUALITY`, `ORBUZ_API
 
 | Variable | Description |
 |----------|-------------|
-| `OPENAI_API_KEY` | Global fallback API key |
-| `OPENAI_API_BASE` | Global fallback API base URL |
+| `ANTHROPIC_API_KEY` | Global fallback API key |
+| `ANTHROPIC_API_BASE` | Global fallback API base URL |
 | `ORBUZ_API_KEY_QUALITY` | Per-tier key for quality model |
 | `ORBUZ_API_BASE_QUALITY` | Per-tier base for quality model |
 | `ORBUZ_API_KEY_BALANCED` | Per-tier key for balanced model |
 | `ORBUZ_API_BASE_BALANCED` | Per-tier base |
 
-Resolution: `ORBUZ_API_KEY_<TIER>` → `OPENAI_API_KEY` → `--api-key`
+Resolution: `ORBUZ_API_KEY_<TIER>` → `ANTHROPIC_API_KEY` → `DEEPSEEK_API_KEY` → `--api-key`
 
 ## Requirements
 
 - Python 3.10+
-- An LLM API key (OpenAI, Anthropic, DeepSeek, or any OpenAI-compatible provider)
+- An LLM API key (Anthropic, DeepSeek, or any API provider)
 
 ## Design Notes
 

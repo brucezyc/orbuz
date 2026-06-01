@@ -9,7 +9,7 @@ Supports per-tier API keys and base URLs for quality/balanced/cheap tiers,
 each potentially from a different provider.
 
 Usage:
-    client = LLMClient({"cheap": "flash", "balanced": "gpt4", "quality": "sonnet"})
+    client = LLMClient({"cheap": "flash", "balanced": "sonnet", "quality": "opus"})
     resp = client.chat("quality", system="...", messages=[...])
 
     With per-tier keys:
@@ -21,7 +21,7 @@ Usage:
     To run in mock mode only (no API):
     client = LLMClient({}, mock=True)
 """
-
+from __future__ import annotations
 import json
 import os
 import time
@@ -29,6 +29,16 @@ import urllib.request
 import urllib.error
 from dataclasses import dataclass, field
 from typing import Literal
+
+
+# ── Default API base ──
+
+DEFAULT_API_BASE = "https://api.deepseek.com/v1"
+"""Default base URL. DeepSeek uses the OpenAI-compatible /chat/completions format.
+
+Supports: DeepSeek, vLLM, Ollama, Together AI, Groq, Fireworks, Anyscale, etc.
+Anthropic users: set a proxy base URL (e.g., api.convex.dev) or set per-tier base.
+"""
 
 
 # ── Call result ──
@@ -44,6 +54,23 @@ class LLMResponse:
     error: str | None = None
 
 
+# ── Environment variable resolution ──
+
+def _resolve_global_key() -> str:
+    """Resolve the global fallback API key.
+    Chain: ANTHROPIC_API_KEY → DEEPSEEK_API_KEY → empty string."""
+    return (os.environ.get("ANTHROPIC_API_KEY", "")
+            or os.environ.get("DEEPSEEK_API_KEY", ""))
+
+
+def _resolve_global_base() -> str:
+    """Resolve the global fallback API base URL.
+    Chain: ANTHROPIC_API_BASE → DEEPSEEK_API_BASE → DEFAULT_API_BASE."""
+    return (os.environ.get("ANTHROPIC_API_BASE", "")
+            or os.environ.get("DEEPSEEK_API_BASE", "")
+            or DEFAULT_API_BASE)
+
+
 # ── Client ──
 
 class LLMClient:
@@ -51,15 +78,15 @@ class LLMClient:
     Model call client with per-tier API key/base support.
 
     models = {
-        "cheap": "gemini-2.0-flash",
-        "balanced": "gpt-4o-mini",
-        "quality": "claude-sonnet-4",
+        "cheap": "claude-sonnet-4",
+        "balanced": "deepseek-chat",
+        "quality": "claude-opus-4",
     }
 
     Per-tier resolution order (for each tier):
       1. tier_config[tier]["api_key"] (from --quality-api-key etc.)
       2. ORBUZ_API_KEY_<TIER> env var (e.g. ORBUZ_API_KEY_QUALITY)
-      3. Global api_key (from --api-key or OPENAI_API_KEY)
+      3. Global api_key (ANTHROPIC_API_KEY → DEEPSEEK_API_KEY)
 
     Same chain for api_base.
     """
@@ -74,10 +101,12 @@ class LLMClient:
         self.models = models or {}
         self.tier_config = tier_config or {}
 
-        # Global fallbacks
-        self._global_key = api_key or os.environ.get("OPENAI_API_KEY", "")
-        self._global_base = (api_base or os.environ.get("OPENAI_API_BASE", "")
-                             or "https://api.openai.com/v1")
+        # Global fallbacks (user-supplied arg wins over env var)
+        self._global_key = api_key or _resolve_global_key()
+        self._global_base = (api_base
+                             or os.environ.get("ANTHROPIC_API_BASE", "")
+                             or os.environ.get("DEEPSEEK_API_BASE", "")
+                             or DEFAULT_API_BASE)
 
         # Pre-resolve per-tier keys/bases
         self._tier_keys: dict[str, str] = {}
@@ -87,7 +116,6 @@ class LLMClient:
             self._tier_bases[tier] = self._resolve_base(tier)
 
         self.mock = mock
-        # If at least one real model + a key for any tier → use real mode
         has_any_key = any(self._tier_keys.values())
         if not self.mock and bool(self.models) and has_any_key:
             self.mock = False
@@ -168,7 +196,6 @@ class LLMClient:
         """Mock mode: returns placeholder text, does not call the API"""
         task_desc = system[:200].replace("\n", " ")
 
-        # Extract goal from messages (if user message exists)
         goal = ""
         if messages:
             for m in reversed(messages):
@@ -214,8 +241,8 @@ class LLMClient:
         """
         Real LLM API call (OpenAI-compatible format).
 
-        Supports: OpenAI, DeepSeek, vLLM, Ollama, Together AI, Groq, Fireworks, etc.
-        Anthropic also works via proxies like api.convex.dev that adopt this format.
+        Supports: DeepSeek, vLLM, Ollama, Together AI, Groq, Fireworks, etc.
+        Anthropic also works via proxies that adopt this format (e.g. api.convex.dev).
 
         api_key and api_base are resolved per-tier by chat() and passed in.
         """
@@ -288,13 +315,12 @@ def create_llm_client(models: dict[str, str] | None = None,
     """Factory function: create a client by provider"""
     if provider == "mock":
         return LLMClient(mock=True)
-    key = api_key or os.environ.get("OPENAI_API_KEY", "")
-    base = api_base or os.environ.get("OPENAI_API_BASE", "")
+    key = api_key or _resolve_global_key()
+    base = api_base or _resolve_global_base()
     has_models = bool(models) if models else False
     if has_models and key:
         return LLMClient(models=models, api_key=key, api_base=base,
                          tier_config=tier_config)
-    # If no global key but per-tier keys exist
     if has_models and tier_config and any(
         tc.get("api_key") for tc in tier_config.values()
     ):
@@ -305,7 +331,7 @@ def create_llm_client(models: dict[str, str] | None = None,
 
 if __name__ == "__main__":
     # Test mock mode
-    client = LLMClient({"cheap": "mock-1", "balanced": "mock-2"})
+    client = LLMClient({"cheap": "claude-sonnet-4", "balanced": "deepseek-chat"})
     resp = client.chat("balanced",
                         system="You are an official policy researcher, searching BIS regulations",
                         messages=[{"role": "user", "content": "Search BIS 2026 entity list"}])

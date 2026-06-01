@@ -28,8 +28,8 @@ def main():
     run.add_argument("--quality-model", required=True, help="Model for the Orchestrator")
     run.add_argument("--balanced-model", required=True, help="Default execution model")
     run.add_argument("--cheap-model", required=True, help="Model for information gathering")
-    run.add_argument("--api-key", help="LLM API key (or set OPENAI_API_KEY env var)")
-    run.add_argument("--api-base", default=None, help="API base URL (default https://api.openai.com/v1, or set OPENAI_API_BASE env var)")
+    run.add_argument("--api-key", help="LLM API key (or set ANTHROPIC_API_KEY or DEEPSEEK_API_KEY env var)")
+    run.add_argument("--api-base", default=None, help="API base URL (default https://api.deepseek.com/v1, or set ANTHROPIC_API_BASE / DEEPSEEK_API_BASE env var)")
     run.add_argument("--quality-api-key", help="Per-tier API key for quality model (overrides --api-key, or set ORBUZ_API_KEY_QUALITY)")
     run.add_argument("--quality-api-base", help="Per-tier API base for quality model (overrides --api-base, or set ORBUZ_API_BASE_QUALITY)")
     run.add_argument("--balanced-api-key", help="Per-tier API key for balanced model (or set ORBUZ_API_KEY_BALANCED)")
@@ -91,7 +91,7 @@ def _cmd_run(args):
             tier_config[tier] = cfg
 
     # Determine mock mode: mock if no global key AND no per-tier key
-    has_global_key = bool(args.api_key or os.environ.get("OPENAI_API_KEY", ""))
+    has_global_key = bool(args.api_key or os.environ.get("ANTHROPIC_API_KEY", "") or os.environ.get("DEEPSEEK_API_KEY", ""))
     has_tier_key = any(
         tc.get("api_key") or os.environ.get(f"ORBUZ_API_KEY_{t.upper()}", "")
         for t, tc in tier_config.items()
@@ -104,7 +104,7 @@ def _cmd_run(args):
 
     if llm.mock:
         print("  🟡 Mock mode: no API key provided, output is placeholder text")
-        print("     Pass --api-key to use real LLM calls")
+        print("     Pass --api-key (or set ANTHROPIC_API_KEY / DEEPSEEK_API_KEY) to use real LLM calls")
 
     # 1. Orchestrator does Recon → plan.json
     orch = Orchestrator(
