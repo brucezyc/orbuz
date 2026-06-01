@@ -112,7 +112,9 @@ class LLMClient:
                  api_key: str | None = None,
                  api_base: str | None = None,
                  tier_config: dict[str, dict] | None = None,
-                 mock: bool = False):
+                 mock: bool = False,
+                 guardrails: str | None = None,
+                 guardrails_tools: str | None = None):
         """
         models: dict of tier -> qualified model ID, e.g.
                 {"quality": "anthropic/claude-opus-4", "balanced": "anthropic/claude-sonnet-4"}
@@ -161,6 +163,14 @@ class LLMClient:
         else:
             self.mock = True
         self._call_count = 0
+
+        # Guardrails setup
+        self.guardrails_enabled = guardrails == "on"
+        self._guardrails = None
+        if self.guardrails_enabled and guardrails_tools:
+            tool_names = [t.strip() for t in guardrails_tools.split(",")]
+            from orbuz.llm.guardrails import Guardrails
+            self._guardrails = Guardrails(tool_names=tool_names)
 
         # httpx session with connection pooling
         self._http = httpx.Client(
@@ -220,6 +230,23 @@ class LLMClient:
             return self._mock_call(model_id, system, messages)
 
         resolved = self.catalog.resolve(model_id)
+
+        # Wrap the call with guardrails if enabled
+        if self.guardrails_enabled and self._guardrails:
+            return self._chat_with_guardrails(
+                model_id, system, messages, temperature, max_tokens,
+                stream, on_chunk, response_format, resolved,
+            )
+
+        # Normal call (no guardrails)
+        return self._chat_direct(
+            model_id, system, messages, temperature, max_tokens,
+            stream, on_chunk, response_format, resolved,
+        )
+
+    def _chat_direct(self, model_id, system, messages, temperature,
+                     max_tokens, stream, on_chunk, response_format, resolved):
+        """Direct LLM call without guardrails."""
         if not resolved:
             return self._call_openai_compatible(
                 model=model_id,
@@ -284,6 +311,44 @@ class LLMClient:
             if prov.api_key:
                 return prov.api_key
         return ""
+
+    def _chat_with_guardrails(self, model_id, system, messages, temperature,
+                               max_tokens, stream, on_chunk, response_format, resolved):
+        """Call LLM with guardrail retry loop."""
+        from orbuz.llm.guardrails import Guardrails
+        assert self._guardrails is not None, "guardrails must be enabled"
+        local_messages = list(messages or [])
+        resp: LLMResponse | None = None
+
+        for attempt in range(5):  # max 5 retries
+            resp = self._chat_direct(
+                model_id, system, local_messages, temperature,
+                max_tokens, stream, on_chunk, response_format, resolved,
+            )
+            if not resp.success:
+                return resp  # pass through errors
+
+            result = self._guardrails.check(resp.content)
+            if result.action == "execute":
+                self._guardrails.reset()
+                # Store parsed tool calls in response metadata (if needed)
+                return resp
+            elif result.action == "retry":
+                local_messages.append({"role": "assistant", "content": resp.content})
+                local_messages.append({"role": "user", "content": result.nudge.content})
+                continue
+            elif result.action == "step_blocked":
+                local_messages.append({"role": "assistant", "content": resp.content})
+                local_messages.append({"role": "user", "content": result.nudge.content})
+                continue
+            else:  # fatal
+                return LLMResponse(
+                    content=resp.content,
+                    model=resp.model,
+                    success=False,
+                    error=result.reason,
+                )
+        return resp  # return last response if max retries reached
 
     def reset_stats(self):
         self._call_count = 0
