@@ -1,33 +1,32 @@
 <p align="center">
   <h1 align="center">orbuz</h1>
-  <p align="center"><strong>Agent orchestration workflow engine for multi-agent research and synthesis.</strong></p>
+  <p align="center"><strong>Multi-agent orchestration engine for research, code review, and knowledge work.</strong></p>
   <p align="center">
-    <code>orbuz run "topic" --quality-model claude-opus-4.8 --api-key sk-xxx</code>
+    <code>orbuz run "topic" --quality-model claude-sonnet-4 --api-key sk-xxx</code>
   </p>
   <p align="center">
-    <a href="#quickstart">Quickstart</a> · <a href="#how-it-works">How it Works</a> · <a href="#cli-reference">CLI</a> · <a href="#agent-library">Agents</a>
+    <a href="#quickstart">Quickstart</a> · <a href="#how-it-works">How it Works</a> · <a href="#execution-patterns">Patterns</a> · <a href="#agent-library">Agents</a>
   </p>
 </p>
 
 ---
 
-> **⚠️ Under slow dev.** The framework is functional — you can run end-to-end workflows in mock or real mode — but APIs and agent definitions may change. Feedback and contributions welcome.
+> **⚠️ Under slow dev.** The framework is functional — you can run end-to-end workflows in mock or real mode — but APIs and agent definitions may change.
 
-orbuz takes a research topic, automatically decomposes it into stages, dispatches specialized agents, and synthesizes the results into a structured deliverable. It uses your own LLM API key — no hosted service, no vendor lock-in.
+orbuz takes a topic, decomposes it into stages, dispatches specialized agents in parallel, and synthesizes results. It uses your own LLM API key — no hosted service, no vendor lock-in.
+
+Built-in patterns: **research** (fanout + pipeline), **code review** (Compound Engineering-style tiered persona selection), and **producer-reviewer** cycles.
 
 ## Quickstart
 
 ```bash
 pip install orbuz-agent-workflow
 
-# Set your API key(s) — each tier can use a different provider
-export OPENAI_API_KEY="sk-..."
-
 # Run a research workflow
 orbuz run "Impact of BIS export controls on AI chip supply chains" \
-  --quality-model claude-opus-4.8 \
-  --balanced-model claude-sonnet-4.6 \
-  --cheap-model claude-sonnet-4.6
+  --quality-model claude-sonnet-4 \
+  --balanced-model claude-sonnet-4 \
+  --cheap-model claude-sonnet-4
 ```
 
 The workflow will:
@@ -36,34 +35,17 @@ The workflow will:
 3. **Execute** — Dispatch agents in parallel, route findings between them, checkpoint between stages
 4. **Deliver** — Write synthesized output to `_workspace/{run_id}/deliver/`
 
-> **No API key?** orbuz runs in mock mode — skip `--api-key` to preview the full flow with placeholder output.
-
-**Per-tier providers:**
-
-Each model tier can use a different provider. Set per-tier API keys and bases via environment variables, or use a single key for all:
-
-```bash
-# Example: quality via Anthropic, balanced/cheap via DeepSeek
-export ORBUZ_API_KEY_QUALITY="sk-ant-..."
-export ORBUZ_API_BASE_QUALITY="https://api.anthropic.com/v1"
-export ORBUZ_API_KEY_BALANCED="sk-ds-..."
-export ORBUZ_API_BASE_BALANCED="https://api.deepseek.com/v1"
-
-orbuz run "..." \
-  --quality-model claude-opus-4.8 \
-  --balanced-model deepseek-chat \
-  --cheap-model deepseek-chat
-```
-
-Fallback: `ORBUZ_API_KEY_<TIER>` → `OPENAI_API_KEY` → `--api-key`. Same chain for `_BASE`.
+> **No API key?** orbuz runs in mock mode — skip `--api-key` to preview with placeholder output.
 
 ## How It Works
 
+### Research Workflow
+
 ```
-┌────────────────────────────────────────────────────┐
-│                    orbuz CLI                       │
-│  orbuz run "topic" --quality-model opus-4.8 ...    │
-└──────────────┬─────────────────────────────────────┘
+┌──────────────────────────────────────────────────────┐
+│                    orbuz CLI                         │
+│  orbuz run "topic" --quality-model sonnet-4 ...      │
+└──────────────┬───────────────────────────────────────┘
                │
                ▼
 ┌──────────────────────────────┐
@@ -93,19 +75,139 @@ Fallback: `ORBUZ_API_KEY_<TIER>` → `OPENAI_API_KEY` → `--api-key`. Same chai
   _workspace/{run_id}/deliver/
 ```
 
-### Execution Patterns
+### Code Review Workflow
+
+```
+orbuz run "Review current branch" --workflow code-review
+
+── Stage 1: Scope ──
+  git diff → file list + line count + diff content
+
+── Stage 2: Persona Selection (auto, based on diff) ──
+  Always-on (7):  correctness, testing, maintainability,
+                  project-standards, agent-native, simplicity, reviewer
+  Cross-cutting:  security (if auth), performance (if queries),
+                  api-contract, reliability, adversarial, ...
+  Stack-specific: swift-ios (if .swift), ...
+
+── Stage 3: Parallel Dispatch ──
+  Each persona returns structured JSON findings
+
+── Stage 4: Merge + Dedup ──
+  Dedup by (file, line, title) — higher severity wins
+
+── Stage 5: Confidence Gating → Report ──
+  P0/P1 high-confidence → report body
+  Low-confidence (gated) → appendix
+```
+
+Personas are selected automatically based on diff content. An auth-related change triggers ~12 reviewers; a simple doc change triggers 7 always-on reviewers only.
+
+## Execution Patterns
 
 | Pattern | Description |
 |---------|-------------|
 | **Fanout** | Multiple agents work in parallel, sharing findings via MessageBus across rounds |
 | **Pipeline** | Agents execute sequentially, each consuming the previous agent's output |
 | **Producer-Reviewer** | Agent produces content, reviewer validates — cycles until PASS |
+| **Code Review** | Compound Engineering-style: scope → persona selection → parallel dispatch → merge-dedup → synthesis |
+
+## Findings Pipeline
+
+Code review agents produce **structured findings** with a standard schema:
+
+```json
+{
+  "findings": [
+    {
+      "severity": "P0|P1|P2|P3",
+      "confidence": 0.0-1.0,
+      "title": "SQL injection in user query",
+      "description": "Direct string interpolation in SQL query",
+      "file": "src/db/users.py",
+      "line": 42,
+      "why_it_matters": "Allows arbitrary SQL execution",
+      "suggested_fix": "Use parameterized queries",
+      "autofix_class": "safe_auto|gated_auto|manual|advisory",
+      "pre_existing": false,
+      "requires_verification": false
+    }
+  ]
+}
+```
+
+- Severity: **P0** (critical) → **P3** (minor)
+- autofix_class: routes findings to auto-fix, manual fix, or advisory
+- Merge-dedup: deduplicates by (file, line, title), higher severity wins
+- Confidence gate: findings below 0.3 are gated
+
+## Agent Library
+
+orbuz ships with **35 agents** organized by persona tier:
+
+### Always-on Reviewers (7)
+| Agent | Focus |
+|-------|-------|
+| `ce-correctness-reviewer` | Logic errors, edge cases, state bugs |
+| `ce-testing-reviewer` | Coverage gaps, weak assertions, brittle tests |
+| `ce-maintainability-reviewer` | Structural quality, coupling, dead code |
+| `ce-project-standards-reviewer` | AGENTS.md/CLAUDE.md compliance |
+| `ce-agent-native-reviewer` | Feature accessibility for agents |
+| `ce-code-simplicity-reviewer` | Over-engineering, YAGNI violations |
+| `code-reviewer` | General purpose line-by-line review |
+
+### Cross-cutting Reviewers (8)
+| Agent | Triggers on | Focus |
+|-------|-------------|-------|
+| `ce-security-reviewer` | auth, secrets, user input | OWASP Top 10, injection, XSS |
+| `ce-performance-reviewer` | queries, loops, caching | N+1, allocations, async |
+| `ce-api-contract-reviewer` | routes, serializers, schemas | API contracts, versioning |
+| `ce-data-migration-reviewer` | migration, schema | Reversibility, rollback |
+| `ce-reliability-reviewer` | retry, timeout, error handling | Circuit breakers, fallbacks |
+| `ce-adversarial-reviewer` | ≥50 lines OR high-risk | Chaos engineering, abuse cases |
+| `ce-previous-comments-reviewer` | existing PR comments | Prior feedback resolution |
+| `ce-architecture-strategist` | 100+ lines OR architecture | SOLID, coupling, design integrity |
+
+### Stack-specific (1)
+| Agent | File extensions | Focus |
+|-------|----------------|-------|
+| `ce-swift-ios-reviewer` | .swift, .xcodeproj, .storyboard | SwiftUI, UIKit, Core Data |
+
+### CE Conditional (1)
+| Agent | Triggers on | Focus |
+|-------|-------------|-------|
+| `ce-deployment-verification-agent` | migrations + risky DDL | Deployment checklist, rollback SQL |
+
+### Research Agents (7)
+deep-researcher, official-researcher, media-researcher, background-researcher, fact-checker, competitive-intel, paper-analyst
+
+### Content Agents (5)
+writer, editor, synthesizer, documentation-writer, merge-agent
+
+### Engineering Agents (4)
+code-reviewer, debugger, test-writer, security-auditor, data-analyst
+
+Agent definitions live in `agents/*.yaml` and are discoverable via `orbuz agents list`.
+
+## Workflows
+
+Pre-built workflows in `workflows/`:
+
+| Workflow | Description |
+|----------|-------------|
+| `deep-research` | Research workflow (fanout research → merge → synthesis) |
+| `code-review` | Compound Engineering-style multi-agent code review |
+
+Use `--workflow <name>` to select a workflow:
+```bash
+orbuz run "Review auth refactor" --workflow code-review --agent-dir agents
+```
 
 ## CLI Reference
 
 | Command | Description |
 |---------|-------------|
-| `orbuz run <topic>` | Start a workflow |
+| `orbuz run <topic>` | Start a workflow (research by default) |
 | `orbuz status` | Show current workflow state |
 | `orbuz stop` | Abort running workflow |
 | `orbuz agents list` | List available agents in the library |
@@ -118,19 +220,11 @@ Fallback: `ORBUZ_API_KEY_<TIER>` → `OPENAI_API_KEY` → `--api-key`. Same chai
 | `--balanced-model` | required | Default execution model |
 | `--cheap-model` | required | Information gathering model |
 | `--api-key` | `OPENAI_API_KEY` | API key (fallback for all tiers) |
-| `--api-base` | `OPENAI_API_BASE` | API endpoint URL (fallback for all tiers) |
+| `--api-base` | `OPENAI_API_BASE` | API endpoint URL |
+| `--workflow-name` | auto | Workflow to execute |
+| `--agent-dir` | `./agents/` | Custom agent directory |
 
-Per-tier key/base override via environment variables: `ORBUZ_API_KEY_QUALITY`, `ORBUZ_API_BASE_QUALITY`, `ORBUZ_API_KEY_BALANCED`, etc.
-
-## Agent Library
-
-orbuz ships with 18 built-in agents organized by expertise:
-
-- **Researchers** — official-researcher, media-researcher, background-researcher, deep-researcher, competitive-intel, paper-analyst, fact-checker
-- **Writers** — writer, editor, synthesizer, documentation-writer, merge-agent
-- **Engineers** — code-reviewer, debugger, test-writer, security-auditor, data-analyst
-
-Each agent is defined as a YAML file in `agents/` with its own system prompt, output structure, and model tier preferences. The Orchestrator selects the right agents during Recon.
+Per-tier key/base via environment variables: `ORBUZ_API_KEY_QUALITY`, `ORBUZ_API_BASE_QUALITY`, etc.
 
 ## Environment Variables
 
@@ -141,16 +235,18 @@ Each agent is defined as a YAML file in `agents/` with its own system prompt, ou
 | `ORBUZ_API_KEY_QUALITY` | Per-tier key for quality model |
 | `ORBUZ_API_BASE_QUALITY` | Per-tier base for quality model |
 | `ORBUZ_API_KEY_BALANCED` | Per-tier key for balanced model |
-| `ORBUZ_API_BASE_BALANCED` | Per-tier base for balanced model |
-| `ORBUZ_API_KEY_CHEAP` | Per-tier key for cheap model |
-| `ORBUZ_API_BASE_CHEAP` | Per-tier base for cheap model |
+| `ORBUZ_API_BASE_BALANCED` | Per-tier base |
 
-Resolution order: `ORBUZ_API_KEY_<TIER>` → `OPENAI_API_KEY` → `--api-key`
+Resolution: `ORBUZ_API_KEY_<TIER>` → `OPENAI_API_KEY` → `--api-key`
 
 ## Requirements
 
 - Python 3.10+
 - An LLM API key (OpenAI, Anthropic, DeepSeek, or any OpenAI-compatible provider)
+
+## Design Notes
+
+orbuz's code review system is inspired by the [Compound Engineering Plugin](https://github.com/EveryInc/compound-engineering-plugin) (18.3k ★) — a Claude Code plugin with 37 skills and 51 agents. The core patterns (layered persona selection, structured JSON findings, confidence-gated merge-dedup, and the brainstorm → plan → work → review → compound lifecycle) are adapted from Compound Engineering's architecture.
 
 ## License
 
