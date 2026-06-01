@@ -2,24 +2,27 @@
 LLM Client — Model Call Abstraction Layer
 ===========================================
 All LLM calls go through this interface.
-Currently in mock mode (returns placeholder text);
-provide an API key to switch to real calls.
 
-Supports per-tier API keys and base URLs for quality/balanced/cheap tiers,
-each potentially from a different provider.
+Uses Catalog + ResolvedModel for provider-aware routing.
+Supports multiple endpoint types:
+  openai/completions  → /v1/chat/completions (DeepSeek, Together, Groq, etc.)
+  anthropic/messages  → /v1/messages (Anthropic native)
+  openai/responses    → /v1/responses
+
+Model ID format: <provider_id>/<model_name>
+  e.g., "anthropic/claude-sonnet-4", "deepseek/deepseek-chat"
 
 Usage:
-    client = LLMClient({"cheap": "flash", "balanced": "sonnet", "quality": "opus"})
-    resp = client.chat("quality", system="...", messages=[...])
+    client = LLMClient()
+    client.set_model("balanced", "anthropic/claude-sonnet-4")
 
-    With per-tier keys:
-    client = LLMClient(models, tier_config={
-        "quality": {"api_key": "sk-ant-...", "api_base": "https://api.anthropic.com/v1"},
-        "balanced": {"api_key": "sk-ds-...", "api_base": "https://api.deepseek.com/v1"},
-    })
+    resp = client.chat("balanced", system="...", messages=[...])
 
-    To run in mock mode only (no API):
-    client = LLMClient({}, mock=True)
+With per-provider keys:
+    client = LLMClient()
+    client.catalog.get_provider("anthropic").api_key = "sk-ant-..."
+    client.catalog.get_provider("deepseek").api_key = "sk-ds-..."
+    client.set_model("balanced", "anthropic/claude-sonnet-4")
 """
 from __future__ import annotations
 import json
@@ -28,17 +31,8 @@ import time
 import urllib.request
 import urllib.error
 from dataclasses import dataclass, field
-from typing import Literal
-
-
-# ── Default API base ──
-
-DEFAULT_API_BASE = "https://api.deepseek.com/v1"
-"""Default base URL. DeepSeek uses the OpenAI-compatible /chat/completions format.
-
-Supports: DeepSeek, vLLM, Ollama, Together AI, Groq, Fireworks, Anyscale, etc.
-Anthropic users: set a proxy base URL (e.g., api.convex.dev) or set per-tier base.
-"""
+from orbuz.llm.catalog import Catalog, ResolvedModel, DEFAULT_MODELS, build_catalog
+from orbuz.llm.provider import EndpointType
 
 
 # ── Call result ──
@@ -57,38 +51,30 @@ class LLMResponse:
 # ── Environment variable resolution ──
 
 def _resolve_global_key() -> str:
-    """Resolve the global fallback API key.
-    Chain: ANTHROPIC_API_KEY → DEEPSEEK_API_KEY → empty string."""
+    """Resolve global fallback API key.
+    Chain: ANTHROPIC_API_KEY → DEEPSEEK_API_KEY → OPENAI_API_KEY → empty."""
     return (os.environ.get("ANTHROPIC_API_KEY", "")
-            or os.environ.get("DEEPSEEK_API_KEY", ""))
+            or os.environ.get("DEEPSEEK_API_KEY", "")
+            or os.environ.get("OPENAI_API_KEY", ""))
 
 
 def _resolve_global_base() -> str:
-    """Resolve the global fallback API base URL.
-    Chain: ANTHROPIC_API_BASE → DEEPSEEK_API_BASE → DEFAULT_API_BASE."""
+    """Resolve global fallback base URL."""
     return (os.environ.get("ANTHROPIC_API_BASE", "")
             or os.environ.get("DEEPSEEK_API_BASE", "")
-            or DEFAULT_API_BASE)
+            or os.environ.get("OPENAI_API_BASE", "")
+            or "")
 
 
 # ── Client ──
 
 class LLMClient:
     """
-    Model call client with per-tier API key/base support.
+    Model call client with provider-aware routing via Catalog.
 
-    models = {
-        "cheap": "claude-sonnet-4",
-        "balanced": "deepseek-chat",
-        "quality": "claude-opus-4",
-    }
-
-    Per-tier resolution order (for each tier):
-      1. tier_config[tier]["api_key"] (from --quality-api-key etc.)
-      2. ORBUZ_API_KEY_<TIER> env var (e.g. ORBUZ_API_KEY_QUALITY)
-      3. Global api_key (ANTHROPIC_API_KEY → DEEPSEEK_API_KEY)
-
-    Same chain for api_base.
+    Each model tier (quality/balanced/cheap) maps to a qualified model ID
+    like "anthropic/claude-sonnet-4". The catalog resolves provider + model
+    config, then the client calls the appropriate API format.
     """
 
     TIERS = ("quality", "balanced", "cheap")
@@ -98,58 +84,71 @@ class LLMClient:
                  api_base: str | None = None,
                  tier_config: dict[str, dict] | None = None,
                  mock: bool = False):
-        self.models = models or {}
-        self.tier_config = tier_config or {}
+        """
+        models: dict of tier → qualified model ID, e.g.
+                {"quality": "anthropic/claude-opus-4", "balanced": "anthropic/claude-sonnet-4"}
+        """
+        # Build catalog with default models
+        self.catalog = Catalog()
+        self.catalog.add_default_models()
 
-        # Global fallbacks (user-supplied arg wins over env var)
-        self._global_key = api_key or _resolve_global_key()
-        self._global_base = (api_base
-                             or os.environ.get("ANTHROPIC_API_BASE", "")
-                             or os.environ.get("DEEPSEEK_API_BASE", "")
-                             or DEFAULT_API_BASE)
+        # Apply global env vars to known providers
+        global_key = api_key or _resolve_global_key()
+        global_base = api_base or _resolve_global_base()
 
-        # Pre-resolve per-tier keys/bases
-        self._tier_keys: dict[str, str] = {}
-        self._tier_bases: dict[str, str] = {}
+        # Apply global key/base to any provider that doesn't have one
+        for prov in self.catalog.all_providers():
+            if not prov.api_key and global_key:
+                prov.api_key = global_key
+            if not prov.base_url and global_base:
+                prov.base_url = global_base
+
+        # Apply per-tier overrides from CLI args
+        tier_config = tier_config or {}
+        self.tier_config = tier_config
         for tier in self.TIERS:
-            self._tier_keys[tier] = self._resolve_key(tier)
-            self._tier_bases[tier] = self._resolve_base(tier)
+            tc = tier_config.get(tier, {})
+            if tc.get("api_key") and tc.get("model_id"):
+                # Per-tier specific provider
+                pid = Catalog.parse_model_id(tc["model_id"])[0]
+                prov = self.catalog.get_provider(pid)
+                if prov:
+                    if tc.get("api_key"):
+                        prov.api_key = tc["api_key"]
+                    if tc.get("api_base"):
+                        prov.base_url = tc["api_base"]
+
+        # Set tier → model mapping
+        self.tier_models: dict[str, str] = {}
+        if models:
+            self.tier_models.update(models)
+        # Fill in defaults for unset tiers
+        for tier in self.TIERS:
+            if tier not in self.tier_models:
+                default = DEFAULT_MODELS.get(tier, "")
+                self.tier_models[tier] = default
 
         self.mock = mock
-        has_any_key = any(self._tier_keys.values())
-        if not self.mock and bool(self.models) and has_any_key:
+        if not self.mock and self._has_any_key():
             self.mock = False
         else:
             self.mock = True
         self._call_count = 0
 
-    def _resolve_key(self, tier: str) -> str:
-        """Resolve API key for a tier: tier_config → env var → global"""
-        tc = self.tier_config.get(tier, {})
-        if tc.get("api_key"):
-            return tc["api_key"]
-        env_key = os.environ.get(f"ORBUZ_API_KEY_{tier.upper()}", "")
-        if env_key:
-            return env_key
-        return self._global_key
+    def set_model(self, tier: str, model_id: str):
+        """Set the model for a tier (e.g., 'balanced' → 'anthropic/claude-sonnet-4')."""
+        self.tier_models[tier] = model_id
 
-    def _resolve_base(self, tier: str) -> str:
-        """Resolve API base for a tier: tier_config → env var → global → default"""
-        tc = self.tier_config.get(tier, {})
-        if tc.get("api_base"):
-            return tc["api_base"]
-        env_base = os.environ.get(f"ORBUZ_API_BASE_{tier.upper()}", "")
-        if env_base:
-            return env_base
-        return self._global_base
+    def _has_any_key(self) -> bool:
+        """Check if any provider has an API key set."""
+        for prov in self.catalog.all_providers():
+            if prov.api_key:
+                return True
+        return False
 
-    def get_key(self, tier: str) -> str:
-        """Get the resolved API key for a tier"""
-        return self._tier_keys.get(tier, self._global_key)
-
-    def get_base(self, tier: str) -> str:
-        """Get the resolved API base URL for a tier"""
-        return self._tier_bases.get(tier, self._global_base)
+    def get_model_name(self, tier: str) -> str:
+        """Return the resolved model name for a tier."""
+        return self.tier_models.get(tier, "")
 
     # ── Public interface ──
 
@@ -160,27 +159,74 @@ class LLMClient:
         """
         Call the LLM.
 
-        model_tier: cheap / balanced / quality
+        model_tier: cheap / balanced / quality (maps to a model ID)
         system: system prompt
         messages: conversation history (optional)
 
         Returns LLMResponse.
         """
-        model_name = self.models.get(model_tier, model_tier)
+        model_id = self.tier_models.get(model_tier, model_tier)
         self._call_count += 1
 
         if self.mock:
-            return self._mock_call(model_name, system, messages)
+            return self._mock_call(model_id, system, messages)
 
-        api_key = self.get_key(model_tier)
-        api_base = self.get_base(model_tier)
-        return self._real_call(model_name, system, messages,
-                               temperature, max_tokens,
-                               api_key=api_key, api_base=api_base)
+        # Resolve through catalog
+        resolved = self.catalog.resolve(model_id)
+        if not resolved:
+            # Fallback: treat as raw model ID
+            return self._call_openai_compatible(
+                model=model_id,
+                system=system,
+                messages=messages,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                api_key=self._first_available_key(),
+                api_base="",
+            )
 
-    def get_model_name(self, tier: str) -> str:
-        """Return the actual model name for a given tier"""
-        return self.models.get(tier, tier)
+        # Route by endpoint type
+        if resolved.is_openai_compatible:
+            return self._call_openai_compatible(
+                model=resolved.api_id,
+                system=system,
+                messages=messages,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                api_key=resolved.api_key,
+                api_base=resolved.base_url,
+                extra_headers=resolved.headers,
+            )
+        elif resolved.is_anthropic:
+            return self._call_anthropic(
+                model=resolved.api_id,
+                system=system,
+                messages=messages,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                api_key=resolved.api_key,
+                api_base=resolved.base_url,
+                extra_headers=resolved.headers,
+            )
+        else:
+            # Fallback to OpenAI-compatible
+            return self._call_openai_compatible(
+                model=resolved.api_id,
+                system=system,
+                messages=messages,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                api_key=resolved.api_key,
+                api_base=resolved.base_url,
+                extra_headers=resolved.headers,
+            )
+
+    def _first_available_key(self) -> str:
+        """Get first non-empty API key from any provider."""
+        for prov in self.catalog.all_providers():
+            if prov.api_key:
+                return prov.api_key
+        return ""
 
     def reset_stats(self):
         self._call_count = 0
@@ -193,9 +239,7 @@ class LLMClient:
 
     def _mock_call(self, model: str, system: str,
                    messages: list[dict] | None) -> LLMResponse:
-        """Mock mode: returns placeholder text, does not call the API"""
         task_desc = system[:200].replace("\n", " ")
-
         goal = ""
         if messages:
             for m in reversed(messages):
@@ -212,7 +256,6 @@ class LLMClient:
         content += (
             "## Mock Results\n\n"
             "This is a mock output.\n\n"
-            "In real mode this will contain the full LLM output.\n\n"
             "### Key Findings (placeholder)\n"
             "- Finding 1: Mock data A\n"
             "- Finding 2: Mock data B\n"
@@ -221,36 +264,24 @@ class LLMClient:
             "- Source 1: https://example.com/source-a\n"
             "- Source 2: https://example.com/source-b\n"
         )
-
         return LLMResponse(
-            content=content,
-            model=model,
-            input_tokens=len(system) // 4,
-            output_tokens=len(content) // 4,
+            content=content, model=model,
+            input_tokens=len(system) // 4, output_tokens=len(content) // 4,
             duration_s=0.5,
         )
 
-    # ── Real call ──
+    # ── OpenAI-compatible (openai/completions) ──
 
-    def _real_call(self, model: str, system: str,
-                   messages: list[dict] | None,
-                   temperature: float,
-                   max_tokens: int,
-                   api_key: str = "",
-                   api_base: str = "") -> LLMResponse:
-        """
-        Real LLM API call (OpenAI-compatible format).
-
-        Supports: DeepSeek, vLLM, Ollama, Together AI, Groq, Fireworks, etc.
-        Anthropic also works via proxies that adopt this format (e.g. api.convex.dev).
-
-        api_key and api_base are resolved per-tier by chat() and passed in.
-        """
-        base = api_base or self._global_base
-        key = api_key or self._global_key
+    def _call_openai_compatible(self, model: str, system: str,
+                                messages: list[dict] | None,
+                                temperature: float, max_tokens: int,
+                                api_key: str = "", api_base: str = "",
+                                extra_headers: dict | None = None) -> LLMResponse:
+        """Call an OpenAI-compatible /v1/chat/completions API."""
+        base = api_base or "https://api.deepseek.com/v1"
+        key = api_key or self._first_available_key()
         url = f"{base.rstrip('/')}/chat/completions"
 
-        # Build message array
         msgs = [{"role": "system", "content": system}]
         if messages:
             msgs.extend(messages)
@@ -264,13 +295,17 @@ class LLMClient:
             "max_tokens": max_tokens,
         }
 
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {key}",
+        }
+        if extra_headers:
+            headers.update(extra_headers)
+
         req = urllib.request.Request(
             url,
             data=json.dumps(body, ensure_ascii=False).encode("utf-8"),
-            headers={
-                "Content-Type": "application/json",
-                "Authorization": f"Bearer {key}",
-            },
+            headers=headers,
         )
 
         start = time.time()
@@ -293,7 +328,6 @@ class LLMClient:
         duration = time.time() - start
         choice = data.get("choices", [{}])[0]
         content = choice.get("message", {}).get("content", "") or ""
-
         usage = data.get("usage", {})
         return LLMResponse(
             content=content,
@@ -304,36 +338,83 @@ class LLMClient:
             success=True,
         )
 
+    # ── Anthropic Messages API (anthropic/messages) ──
 
-# ── Convenience factory ──
+    def _call_anthropic(self, model: str, system: str,
+                        messages: list[dict] | None,
+                        temperature: float, max_tokens: int,
+                        api_key: str = "", api_base: str = "",
+                        extra_headers: dict | None = None) -> LLMResponse:
+        """Call Anthropic's /v1/messages API."""
+        base = api_base or "https://api.anthropic.com/v1"
+        key = api_key or self._first_available_key()
+        url = f"{base.rstrip('/')}/messages"
 
-def create_llm_client(models: dict[str, str] | None = None,
-                      api_key: str | None = None,
-                      api_base: str | None = None,
-                      tier_config: dict[str, dict] | None = None,
-                      provider: str = "auto") -> LLMClient:
-    """Factory function: create a client by provider"""
-    if provider == "mock":
-        return LLMClient(mock=True)
-    key = api_key or _resolve_global_key()
-    base = api_base or _resolve_global_base()
-    has_models = bool(models) if models else False
-    if has_models and key:
-        return LLMClient(models=models, api_key=key, api_base=base,
-                         tier_config=tier_config)
-    if has_models and tier_config and any(
-        tc.get("api_key") for tc in tier_config.values()
-    ):
-        return LLMClient(models=models, api_key=key, api_base=base,
-                         tier_config=tier_config)
-    return LLMClient(mock=True)
+        # Convert system prompt to Anthropic's system parameter
+        anthropic_messages = []
+        if messages:
+            for m in messages:
+                role = m.get("role", "user")
+                content = m.get("content", "")
+                if role == "system":
+                    continue  # handled separately
+                anthropic_messages.append({
+                    "role": "assistant" if role == "assistant" else "user",
+                    "content": content,
+                })
 
+        body = {
+            "model": model,
+            "system": system,
+            "messages": anthropic_messages or [{"role": "user", "content": "Please execute the above task."}],
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+        }
 
-if __name__ == "__main__":
-    # Test mock mode
-    client = LLMClient({"cheap": "claude-sonnet-4", "balanced": "deepseek-chat"})
-    resp = client.chat("balanced",
-                        system="You are an official policy researcher, searching BIS regulations",
-                        messages=[{"role": "user", "content": "Search BIS 2026 entity list"}])
-    print(f"Model: {resp.model}, Tokens: {resp.input_tokens}+{resp.output_tokens}")
-    print(resp.content[:300])
+        headers = {
+            "Content-Type": "application/json",
+            "x-api-key": key,
+            "anthropic-version": "2023-06-01",
+        }
+        if extra_headers:
+            headers.update(extra_headers)
+
+        req = urllib.request.Request(
+            url,
+            data=json.dumps(body, ensure_ascii=False).encode("utf-8"),
+            headers=headers,
+        )
+
+        start = time.time()
+        try:
+            with urllib.request.urlopen(req, timeout=120) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+        except urllib.error.HTTPError as e:
+            body_text = e.read().decode("utf-8", errors="replace") if e.fp else str(e)
+            return LLMResponse(
+                success=False, content="",
+                error=f"HTTP {e.code}: {body_text[:500]}",
+                duration_s=time.time() - start,
+            )
+        except Exception as e:
+            return LLMResponse(
+                success=False, content="",
+                error=str(e), duration_s=time.time() - start,
+            )
+
+        duration = time.time() - start
+        content = ""
+        if data.get("content"):
+            for block in data["content"]:
+                if block.get("type") == "text":
+                    content += block.get("text", "")
+
+        usage = data.get("usage", {})
+        return LLMResponse(
+            content=content,
+            model=data.get("model", model),
+            input_tokens=usage.get("input_tokens", 0),
+            output_tokens=usage.get("output_tokens", 0),
+            duration_s=duration,
+            success=True,
+        )

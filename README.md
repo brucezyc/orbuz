@@ -22,11 +22,13 @@ Built-in patterns: **research** (fanout + pipeline), **code review** (Compound E
 ```bash
 pip install orbuz-agent-workflow
 
-# Run a research workflow
+# Each tier uses a qualified model ID: <provider>/<model>
+# Provider is auto-detected from the prefix — keys are resolved accordingly
 orbuz run "Impact of BIS export controls on AI chip supply chains" \
-  --quality-model claude-sonnet-4 \
-  --balanced-model claude-sonnet-4 \
-  --cheap-model claude-sonnet-4
+  --quality-model "anthropic/claude-opus-4" \
+  --balanced-model "anthropic/claude-sonnet-4" \
+  --cheap-model "deepseek/deepseek-chat" \
+  --api-key "sk-ant-..."
 ```
 
 The workflow will:
@@ -216,15 +218,49 @@ orbuz run "Review auth refactor" --workflow code-review --agent-dir agents
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--quality-model` | required | Orchestrator and synthesis model |
-| `--balanced-model` | required | Default execution model |
-| `--cheap-model` | required | Information gathering model |
-| `--api-key` | `ANTHROPIC_API_KEY` or `DEEPSEEK_API_KEY` | API key (fallback for all tiers) |
-| `--api-base` | `ANTHROPIC_API_BASE` or `DEEPSEEK_API_BASE` | API endpoint URL |
+| `--quality-model` | required | Qualified model ID, e.g. `anthropic/claude-opus-4` |
+| `--balanced-model` | required | Qualified model ID, e.g. `anthropic/claude-sonnet-4` |
+| `--cheap-model` | required | Qualified model ID, e.g. `deepseek/deepseek-chat` |
+| `--api-key` | `ANTHROPIC_API_KEY` or `DEEPSEEK_API_KEY` | API key (applied to all providers without their own key) |
+| `--api-base` | provider default | API base URL override |
+| `--quality-api-key` | | Per-tier API key for the quality model's provider |
+| `--quality-api-base` | | Per-tier API base for the quality model's provider |
+| `--balanced-api-key` | | Per-tier API key for the balanced model's provider |
+| `--balanced-api-base` | | Per-tier API base for the balanced model's provider |
+| `--cheap-api-key` | | Per-tier API key for the cheap model's provider |
+| `--cheap-api-base` | | Per-tier API base for the cheap model's provider |
 | `--workflow-name` | auto | Workflow to execute |
 | `--agent-dir` | `./agents/` | Custom agent directory |
 
-Per-tier key/base via environment variables: `ORBUZ_API_KEY_QUALITY`, `ORBUZ_API_BASE_QUALITY`, etc.
+### Model IDs
+
+Model IDs use the format `<provider>/<model>` — the provider prefix auto-selects the API format:
+
+| Model ID | Endpoint | API Format |
+|----------|----------|-----------|
+| `anthropic/claude-sonnet-4` | `api.anthropic.com` | `anthropic/messages` |
+| `anthropic/claude-opus-4` | `api.anthropic.com` | `anthropic/messages` |
+| `deepseek/deepseek-chat` | `api.deepseek.com` | `openai/completions` |
+| `openai/gpt-5` | `api.openai.com` | `openai/completions` |
+| `openrouter/auto` | `openrouter.ai` | `openai/completions` |
+
+Provider keys are resolved from: `--<tier>-api-key` → `ANTHROPIC_API_KEY` / `DEEPSEEK_API_KEY` → `--api-key`.
+
+### Catalog
+
+orbuz ships with a built-in model catalog (`orbuz/llm/catalog.py`) that knows 6 providers and 9 default models. The catalog resolves provider configs (endpoint type, base URL, headers) and merges them with model-level overrides — inspired by OpenCode's plugin-based provider system.
+
+```python
+from orbuz.llm.catalog import Catalog
+
+cat = Catalog()
+cat.add_default_models()
+
+# Resolve a model → knows it's Anthropic, uses messages API
+model = cat.resolve("anthropic/claude-sonnet-4")
+print(model.endpoint_type)  # "anthropic/messages"
+print(model.api_id)         # "claude-sonnet-4-20250514"
+```
 
 ## Environment Variables
 
@@ -246,7 +282,7 @@ Resolution: `ORBUZ_API_KEY_<TIER>` → `ANTHROPIC_API_KEY` → `DEEPSEEK_API_KEY
 
 ## Design Notes
 
-orbuz's code review system is inspired by the [Compound Engineering Plugin](https://github.com/EveryInc/compound-engineering-plugin) (18.3k ★) — a Claude Code plugin with 37 skills and 51 agents. The core patterns (layered persona selection, structured JSON findings, confidence-gated merge-dedup, and the brainstorm → plan → work → review → compound lifecycle) are adapted from Compound Engineering's architecture.
+orbuz's code review system is inspired by the [Compound Engineering Plugin](https://github.com/EveryInc/compound-engineering-plugin) (18.3k ★). The model routing layer (provider catalog, endpoint types, resolution chain) is adapted from [OpenCode](https://github.com/anomalyco/opencode)'s plugin-based provider system.
 
 ## License
 

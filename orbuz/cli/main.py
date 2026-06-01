@@ -3,10 +3,10 @@ orbuz — Standalone Multi-Agent Workflow Runtime
 
 Usage:
     orbuz run "Latest impact of US AI chip export controls" \
-        --quality-model "claude-sonnet-4" \
-        --cheap-model "gemini-2.0-flash" \
-        --api-key "..."
-    
+        --quality-model "anthropic/claude-opus-4" \
+        --balanced-model "anthropic/claude-sonnet-4" \
+        --cheap-model "deepseek/deepseek-chat"
+
     orbuz status            # view current run status
     orbuz stop              # abort the current run
     orbuz agents list       # list the agent library
@@ -25,17 +25,17 @@ def main():
     # orbuz run
     run = sub.add_parser("run", help="Start a workflow")
     run.add_argument("topic", help="Research topic")
-    run.add_argument("--quality-model", required=True, help="Model for the Orchestrator")
-    run.add_argument("--balanced-model", required=True, help="Default execution model")
-    run.add_argument("--cheap-model", required=True, help="Model for information gathering")
+    run.add_argument("--quality-model", required=True, help="Quality model ID (e.g. 'anthropic/claude-opus-4')")
+    run.add_argument("--balanced-model", required=True, help="Balanced model ID (e.g. 'anthropic/claude-sonnet-4')")
+    run.add_argument("--cheap-model", required=True, help="Cheap model ID (e.g. 'deepseek/deepseek-chat')")
     run.add_argument("--api-key", help="LLM API key (or set ANTHROPIC_API_KEY or DEEPSEEK_API_KEY env var)")
-    run.add_argument("--api-base", default=None, help="API base URL (default https://api.deepseek.com/v1, or set ANTHROPIC_API_BASE / DEEPSEEK_API_BASE env var)")
-    run.add_argument("--quality-api-key", help="Per-tier API key for quality model (overrides --api-key, or set ORBUZ_API_KEY_QUALITY)")
-    run.add_argument("--quality-api-base", help="Per-tier API base for quality model (overrides --api-base, or set ORBUZ_API_BASE_QUALITY)")
-    run.add_argument("--balanced-api-key", help="Per-tier API key for balanced model (or set ORBUZ_API_KEY_BALANCED)")
-    run.add_argument("--balanced-api-base", help="Per-tier API base for balanced model (or set ORBUZ_API_BASE_BALANCED)")
-    run.add_argument("--cheap-api-key", help="Per-tier API key for cheap model (or set ORBUZ_API_KEY_CHEAP)")
-    run.add_argument("--cheap-api-base", help="Per-tier API base for cheap model (or set ORBUZ_API_BASE_CHEAP)")
+    run.add_argument("--api-base", default=None, help="API base URL (or set ANTHROPIC_API_BASE / DEEPSEEK_API_BASE env var)")
+    run.add_argument("--quality-api-key", help="Per-tier API key for quality model provider")
+    run.add_argument("--quality-api-base", help="Per-tier API base for quality model provider")
+    run.add_argument("--balanced-api-key", help="Per-tier API key for balanced model provider")
+    run.add_argument("--balanced-api-base", help="Per-tier API base for balanced model provider")
+    run.add_argument("--cheap-api-key", help="Per-tier API key for cheap model provider")
+    run.add_argument("--cheap-api-base", help="Per-tier API base for cheap model provider")
     run.add_argument("--workflow-name", default=None, help="Workflow name (default: auto)")
     run.add_argument("--agent-dir", default=None, help="Agent YAML directory")
 
@@ -104,7 +104,8 @@ def _cmd_run(args):
 
     if llm.mock:
         print("  🟡 Mock mode: no API key provided, output is placeholder text")
-        print("     Pass --api-key (or set ANTHROPIC_API_KEY / DEEPSEEK_API_KEY) to use real LLM calls")
+        print("     Pass --api-key (or set ANTHROPIC_API_KEY / DEEPSEEK_API_KEY)")
+        print("     Example: orbuz run \"topic\" --quality-model anthropic/claude-opus-4 --api-key sk-...")
 
     # 1. Orchestrator does Recon → plan.json
     orch = Orchestrator(
