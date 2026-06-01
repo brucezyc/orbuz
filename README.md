@@ -25,9 +25,9 @@ pip install orbuz-agent-workflow
 # Each tier uses a qualified model ID: <provider>/<model>
 # Provider is auto-detected from the prefix — keys are resolved accordingly
 orbuz run "Impact of BIS export controls on AI chip supply chains" \
-  --quality-model "anthropic/claude-opus-4" \
-  --balanced-model "anthropic/claude-sonnet-4" \
-  --cheap-model "deepseek/deepseek-chat" \
+  --quality-model "anthropic/claude-opus-4-8" \
+  --balanced-model "anthropic/claude-sonnet-4-6" \
+  --cheap-model "deepseek/deepseek-v4-flash" \
   --api-key "sk-ant-..."
 ```
 
@@ -218,9 +218,9 @@ orbuz run "Review auth refactor" --workflow code-review --agent-dir agents
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--quality-model` | required | Qualified model ID, e.g. `anthropic/claude-opus-4` |
-| `--balanced-model` | required | Qualified model ID, e.g. `anthropic/claude-sonnet-4` |
-| `--cheap-model` | required | Qualified model ID, e.g. `deepseek/deepseek-chat` |
+| `--quality-model` | required | Qualified model ID, e.g. `anthropic/claude-opus-4-8` |
+| `--balanced-model` | required | Qualified model ID, e.g. `anthropic/claude-sonnet-4-6` |
+| `--cheap-model` | required | Qualified model ID, e.g. `deepseek/deepseek-v4-flash` |
 | `--api-key` | `ANTHROPIC_API_KEY` or `DEEPSEEK_API_KEY` | API key (applied to all providers without their own key) |
 | `--api-base` | provider default | API base URL override |
 | `--quality-api-key` | | Per-tier API key for the quality model's provider |
@@ -236,19 +236,24 @@ orbuz run "Review auth refactor" --workflow code-review --agent-dir agents
 
 Model IDs use the format `<provider>/<model>` — the provider prefix auto-selects the API format:
 
-| Model ID | Endpoint | API Format |
-|----------|----------|-----------|
-| `anthropic/claude-sonnet-4` | `api.anthropic.com` | `anthropic/messages` |
-| `anthropic/claude-opus-4` | `api.anthropic.com` | `anthropic/messages` |
-| `deepseek/deepseek-chat` | `api.deepseek.com` | `openai/completions` |
-| `openai/gpt-5` | `api.openai.com` | `openai/completions` |
-| `openrouter/auto` | `openrouter.ai` | `openai/completions` |
+| Model ID | Provider | Endpoint | API Format | Tier |
+|----------|----------|----------|-----------|------|
+| `anthropic/claude-opus-4-8` | Anthropic | `api.anthropic.com` | `anthropic/messages` | High |
+| `anthropic/claude-sonnet-4-6` | Anthropic | `api.anthropic.com` | `anthropic/messages` | Mid |
+| `anthropic/claude-haiku-4-5` | Anthropic | `api.anthropic.com` | `anthropic/messages` | Low |
+| `deepseek/deepseek-v4-pro` | DeepSeek | `api.deepseek.com` | `openai/completions` | High |
+| `deepseek/deepseek-v4-flash` | DeepSeek | `api.deepseek.com` | `openai/completions` | Low |
+| `openai/gpt-5.5` | OpenAI | `api.openai.com` | `openai/completions` | High |
+| `openai/gpt-5.4-mini` | OpenAI | `api.openai.com` | `openai/completions` | Low |
+| `google/gemini-3.1-pro-preview` | Google | `generativelanguage.googleapis.com` | `openai/completions` | High |
+| `google/gemini-3.1-flash-lite` | Google | `generativelanguage.googleapis.com` | `openai/completions` | Low |
+| `openrouter/auto` | OpenRouter | `openrouter.ai` | `openai/completions` | Router |
 
 Provider keys are resolved from: `--<tier>-api-key` → `ANTHROPIC_API_KEY` / `DEEPSEEK_API_KEY` → `--api-key`.
 
 ### Catalog
 
-orbuz ships with a built-in model catalog (`orbuz/llm/catalog.py`) that knows 6 providers and 9 default models. The catalog resolves provider configs (endpoint type, base URL, headers) and merges them with model-level overrides — inspired by OpenCode's plugin-based provider system.
+orbuz ships with a built-in model catalog (`orbuz/llm/catalog.py`) that knows 6 providers and 12 default models (Opus 4.8, Sonnet 4.6, Haiku 4.5, DeepSeek V4 Pro/Flash, GPT-5.5, GPT-5.4-mini, Gemini 3.1 Pro/Flash Lite, OpenRouter). The catalog resolves provider configs (endpoint type, base URL, headers) and merges them with model-level overrides — inspired by OpenCode's plugin-based provider system.
 
 ```python
 from orbuz.llm.catalog import Catalog

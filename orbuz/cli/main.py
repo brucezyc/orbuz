@@ -25,9 +25,9 @@ def main():
     # orbuz run
     run = sub.add_parser("run", help="Start a workflow")
     run.add_argument("topic", help="Research topic")
-    run.add_argument("--quality-model", required=True, help="Quality model ID (e.g. 'anthropic/claude-opus-4')")
-    run.add_argument("--balanced-model", required=True, help="Balanced model ID (e.g. 'anthropic/claude-sonnet-4')")
-    run.add_argument("--cheap-model", required=True, help="Cheap model ID (e.g. 'deepseek/deepseek-chat')")
+    run.add_argument("--quality-model", required=True, help="Quality model ID (e.g. 'anthropic/claude-opus-4-8')")
+    run.add_argument("--balanced-model", required=True, help="Balanced model ID (e.g. 'anthropic/claude-sonnet-4-6')")
+    run.add_argument("--cheap-model", required=True, help="Cheap model ID (e.g. 'deepseek/deepseek-v4-flash')")
     run.add_argument("--api-key", help="LLM API key (or set ANTHROPIC_API_KEY or DEEPSEEK_API_KEY env var)")
     run.add_argument("--api-base", default=None, help="API base URL (or set ANTHROPIC_API_BASE / DEEPSEEK_API_BASE env var)")
     run.add_argument("--quality-api-key", help="Per-tier API key for quality model provider")
@@ -105,7 +105,7 @@ def _cmd_run(args):
     if llm.mock:
         print("  🟡 Mock mode: no API key provided, output is placeholder text")
         print("     Pass --api-key (or set ANTHROPIC_API_KEY / DEEPSEEK_API_KEY)")
-        print("     Example: orbuz run \"topic\" --quality-model anthropic/claude-opus-4 --api-key sk-...")
+        print("     Example: orbuz run \"topic\" --quality-model anthropic/claude-opus-4-8 --api-key sk-...")
 
     # 1. Orchestrator does Recon → plan.json
     orch = Orchestrator(

@@ -14,9 +14,9 @@ from orbuz.llm.provider import ProviderConfig, ModelInfo, EndpointType, KNOWN_PR
 # ── Default model presets ──
 
 DEFAULT_MODELS: dict[str, str] = {
-    "quality": "anthropic/claude-opus-4",
-    "balanced": "anthropic/claude-sonnet-4",
-    "cheap": "deepseek/deepseek-chat",
+    "quality": "anthropic/claude-opus-4-8",
+    "balanced": "anthropic/claude-sonnet-4-6",
+    "cheap": "deepseek/deepseek-v4-flash",
 }
 
 
@@ -177,35 +177,37 @@ class Catalog:
 
         # Anthropic
         anth = self.add_provider("anthropic")
-        anth.add_model("claude-opus-4",     api_id="claude-opus-4-20250514", family="claude-opus",
-                       context_limit=200000, output_limit=8192)
-        anth.add_model("claude-sonnet-4",   api_id="claude-sonnet-4-20250514", family="claude-sonnet",
-                       context_limit=200000, output_limit=8192)
-        anth.add_model("claude-haiku-3",    api_id="claude-3-5-haiku-20241022", family="claude-haiku",
-                       context_limit=200000, output_limit=8192)
+        anth.add_model("claude-opus-4-8",     api_id="claude-opus-4-8", family="claude-opus",
+                       context_limit=1000000, output_limit=131072)
+        anth.add_model("claude-sonnet-4-6",   api_id="claude-sonnet-4-6", family="claude-sonnet",
+                       context_limit=1000000, output_limit=65536)
+        anth.add_model("claude-haiku-4-5",    api_id="claude-haiku-4-5", family="claude-haiku",
+                       context_limit=200000, output_limit=65536)
 
-        # DeepSeek
+        # DeepSeek (V4 — deepseek-chat/reasoner deprecated Jul 2026)
         ds = self.add_provider("deepseek")
-        ds.add_model("deepseek-chat",       api_id="deepseek-chat", family="deepseek-chat",
-                     context_limit=65536, output_limit=8192)
-        ds.add_model("deepseek-reasoner",   api_id="deepseek-reasoner", family="deepseek-reasoner",
-                     context_limit=65536, output_limit=8192)
+        ds.add_model("deepseek-v4-pro",       api_id="deepseek-v4-pro", family="deepseek-v4",
+                     context_limit=1000000, output_limit=8192)
+        ds.add_model("deepseek-v4-flash",     api_id="deepseek-v4-flash", family="deepseek-v4",
+                     context_limit=131072, output_limit=8192)
 
         # OpenAI
         oai = self.add_provider("openai")
-        oai.add_model("gpt-5",              api_id="gpt-5", family="gpt-5",
-                      context_limit=131072, output_limit=16384)
-        oai.add_model("gpt-5-mini",         api_id="gpt-5-mini", family="gpt-5-mini",
+        oai.add_model("gpt-5.5",              api_id="gpt-5.5", family="gpt-5.5",
+                      context_limit=1100000, output_limit=131072)
+        oai.add_model("gpt-5.4-mini",         api_id="gpt-5.4-mini", family="gpt-5.4",
                       context_limit=131072, output_limit=16384)
 
         # OpenRouter (generic routing)
         or_ = self.add_provider("openrouter")
-        or_.add_model("auto",               api_id="auto", family="router")
+        or_.add_model("auto", api_id="auto", family="router")
 
-        # Google (Gemini via OpenAI-compatible)
+        # Google (Gemini via OpenAI-compatible proxy)
         g = self.add_provider("google")
-        g.add_model("gemini-2.5-pro",       api_id="gemini-2.5-pro-exp-03-25", family="gemini-pro",
-                    context_limit=1048576, output_limit=8192)
+        g.add_model("gemini-3.1-pro-preview",     api_id="gemini-3.1-pro-preview", family="gemini-pro",
+                    context_limit=1000000, output_limit=65536)
+        g.add_model("gemini-3.1-flash-lite",      api_id="gemini-3.1-flash-lite", family="gemini-flash",
+                    context_limit=1000000, output_limit=65536)
 
     @staticmethod
     def parse_model_id(model_id: str) -> tuple[str, str]:
