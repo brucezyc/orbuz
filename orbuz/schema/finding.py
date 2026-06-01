@@ -121,6 +121,44 @@ class FindingSet(BaseModel):
     def to_dict(self) -> dict:
         return self.model_dump()
 
+    @classmethod
+    def from_data(cls, data: dict | list, persona: str = "") -> "FindingSet":
+        """Parse raw findings data from a JSON response (json_object mode).
+
+        Accepts both:
+          {"findings": [...]}
+          [...]  # bare list
+        """
+        if isinstance(data, list):
+            raw = data
+        else:
+            raw = data.get("findings", [])
+        if isinstance(raw, list) and raw:
+            findings = []
+            for item in raw:
+                if isinstance(item, dict) and "severity" in item:
+                    try:
+                        finding = Finding(
+                            persona=persona,
+                            severity=item.get("severity", "P3"),
+                            autofix_class=item.get("autofix_class", "advisory"),
+                            confidence=float(item.get("confidence", 0.5)),
+                            title=item.get("title", ""),
+                            description=item.get("description", ""),
+                            file=item.get("file", ""),
+                            line=item.get("line"),
+                            why_it_matters=item.get("why_it_matters", ""),
+                            suggested_fix=item.get("suggested_fix"),
+                            pre_existing=bool(item.get("pre_existing", False)),
+                            requires_verification=bool(item.get("requires_verification", False)),
+                        )
+                        findings.append(finding)
+                    except (ValueError, TypeError):
+                        continue
+            if findings:
+                return cls(findings=findings, persona=persona)
+        return cls(persona=persona)
+
 
 class MergeDedupResult(BaseModel):
     """Result of merging multiple FindingSets."""

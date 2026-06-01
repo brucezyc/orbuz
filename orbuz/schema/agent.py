@@ -74,12 +74,33 @@ class PersonaConfig(BaseModel):
     icon: str = "👤"
 
 
+class MCPSpec(BaseModel):
+    """MCP tool pre-fetch specification for an agent.
+
+    Defines tool calls that are executed BEFORE the LLM call,
+    with results injected into the agent's context.
+    """
+    server: str = ""
+    """Name of the MCP server (from mcp config). If empty, searches all servers."""
+    tool: str
+    """Tool name to call."""
+    params: dict = Field(default_factory=dict)
+    """Static parameters for the tool call."""
+    dynamic_params: list[str] = Field(default_factory=list)
+    """Agent-definable parameter keys — values filled from the agent's goal/context."""
+    required: bool = False
+    """If True and the tool fails, the agent run also fails."""
+    label: str = ""
+    """Context section label. Defaults to tool name."""
+
+
 class AgentDefinition(BaseModel):
     name: str
     version: str = "1.0.0"
     description: str = ""
     summary: str = ""
     toolsets: list[str] = []
+    """Legacy toolset names (terminal, web, etc.) — reserved for future tool routing."""
     skills: list[str] = []
     principles: list[str] = []
     constraints: list[str] = []
@@ -87,6 +108,10 @@ class AgentDefinition(BaseModel):
     mode: dict = {"execution": "subagent"}
     model_hint: ModelHint = ModelHint()
     notes: str | None = None
+
+    # ── MCP tool injection ──
+    mcp_tools: list[MCPSpec] = Field(default_factory=list)
+    """MCP tools to pre-fetch before the LLM call. Results injected into context."""
 
     # ── Compound Engineering extensions ──
     persona_tier: PersonaTier = PersonaTier.always_on

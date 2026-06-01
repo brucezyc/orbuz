@@ -134,6 +134,16 @@ def _cmd_run(args):
             exe.continue_with(decision)
         elif event["type"] == "done":
             print(f"\n✅ Done. Output: {event['output_path']}")
+            cost = event.get("cost_summary", {})
+            if cost:
+                total = cost.get("total_cost_usd", 0)
+                tokens = cost.get("total_tokens", 0)
+                print(f"   💰 ${total:.4f} | {tokens:,} tokens total")
+                if cost.get("per_agent"):
+                    top = sorted(cost["per_agent"].items(),
+                                 key=lambda x: x[1]["cost_usd"], reverse=True)[:3]
+                    for name, stats in top:
+                        print(f"      {name}: ${stats['cost_usd']:.4f} ({stats['calls']} calls)")
 
     # 4. Register new agents
     if plan.get("agent_registry_updates"):

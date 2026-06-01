@@ -16,6 +16,10 @@ import textwrap
 from orbuz.schema.agent import AgentDefinition, ModelHint
 from orbuz.schema.finding import Finding, FindingSet, MergeDedupResult, Severity, AutofixClass
 from orbuz.llm.client import LLMClient, LLMResponse
+from orbuz.core.plugin import get_registry
+
+
+_plugins = get_registry()
 
 
 def merge_dedup_findings(sets: list[FindingSet]) -> MergeDedupResult:
@@ -61,6 +65,7 @@ class DispatcherResult:
                  claims: list[dict] = None, tier_used: str = "",
                  model_used: str = "", duration_s: float = 0.0,
                  tokens: int = 0, error: str = "",
+                 cost_usd: float = 0.0,
                  findings: FindingSet | None = None):
         self.success = success
         self.output = output
@@ -70,6 +75,7 @@ class DispatcherResult:
         self.duration_s = duration_s
         self.tokens = tokens
         self.error = error
+        self.cost_usd = cost_usd
         self.findings = findings or FindingSet(persona="")
 
 
@@ -82,10 +88,14 @@ class Dispatcher:
         result = d.run_agent(agent_def, goal, context, tier="cheap")
         if not result.success:
             result = d.handle_failure(agent_def, goal, context, result)
+
+    Supports MCP tool injection: if an agent definition includes mcp_tools,
+    those tools are called BEFORE the LLM and their results injected as context.
     """
 
-    def __init__(self, llm_client: LLMClient):
+    def __init__(self, llm_client: LLMClient, mcp_manager=None):
         self.llm = llm_client
+        self.mcp = mcp_manager
 
     def run_agent(self, agent_def: AgentDefinition, goal: str,
                   context: str = "", tier: str = "balanced",
@@ -100,31 +110,76 @@ class Dispatcher:
         tier:      model tier (cheap/balanced/quality)
         messages_from_bus: discovery summaries from other agents
         require_structured_findings: if True, enforce JSON findings output contract
+                     (uses response_format for guaranteed JSON output)
 
         Returns DispatcherResult containing output + claims + findings.
         """
         model_name = self.llm.get_model_name(tier)
 
-        if require_structured_findings and agent_def.output_contract.produces_findings:
+        use_structured = require_structured_findings and agent_def.output_contract.produces_findings
+
+        if use_structured:
             system = self._build_reviewer_prompt(agent_def)
         else:
             system = self._build_system_prompt(agent_def)
 
-        user = self._build_user_prompt(agent_def, goal, context, messages_from_bus)
+        # ── MCP tool injection ──
+        # Pre-fetch MCP tool results and inject into context
+        mcp_context = self._resolve_mcp_tools(agent_def, goal, context)
+        full_context = context
+        if mcp_context:
+            full_context = (context + "\n\n" + mcp_context) if context else mcp_context
+
+        # ── Plugin hook: before_agent_run ──
+        hook_context = _plugins.run("before_agent_run", full_context, goal, agent_def)
+        if hook_context:
+            full_context = hook_context
+
+        user = self._build_user_prompt(agent_def, goal, full_context, messages_from_bus)
+
+        # Use response_format for structured JSON output when the model supports it
+        # (OpenAI-compatible APIs). Avoid for Anthropic native API which lacks this.
+        resolved = self.llm.catalog.resolve(self.llm.get_model_name(tier))
+        use_json_mode = use_structured and resolved and resolved.is_openai_compatible
+
+        response_format = {"type": "json_object"} if use_json_mode else None
 
         resp = self.llm.chat(
             model_tier=tier,
             system=system,
             messages=[{"role": "user", "content": user}],
+            response_format=response_format,
         )
 
         # Extract structured claims
         claims = self._extract_claims(resp.content, agent_def.name)
 
         # Extract structured findings
-        findings = self._extract_findings(resp.content, agent_def.name)
+        # In json_object mode, the entire response is valid JSON (with prose in system prompt)
+        # so we try direct JSON parse first, then fall back to regex extraction
+        if use_structured and resp.content.strip().startswith("{"):
+            try:
+                data = json.loads(resp.content)
+                findings = FindingSet.from_data(data, persona=agent_def.name)
+                if findings and findings.findings:
+                    pass  # Successfully parsed from json_object mode
+                else:
+                    findings = self._extract_findings(resp.content, agent_def.name)
+            except (json.JSONDecodeError, TypeError):
+                findings = self._extract_findings(resp.content, agent_def.name)
+        else:
+            findings = self._extract_findings(resp.content, agent_def.name)
 
-        return DispatcherResult(
+        # If json_object mode was used but no findings found via extraction,
+        # try treating the entire response as a findings JSON document
+        if use_json_mode and (not findings or not findings.findings):
+            try:
+                data = json.loads(resp.content)
+                findings = FindingSet.from_data(data, persona=agent_def.name)
+            except (json.JSONDecodeError, TypeError):
+                pass
+
+        result = DispatcherResult(
             success=resp.success,
             output=resp.content,
             claims=claims,
@@ -133,8 +188,14 @@ class Dispatcher:
             model_used=model_name,
             duration_s=resp.duration_s,
             tokens=resp.input_tokens + resp.output_tokens,
+            cost_usd=resp.cost_usd,
             error=resp.error or "",
         )
+
+        # ── Plugin hook: after_agent_run ──
+        _plugins.run("after_agent_run", agent_def, result)
+
+        return result
 
     def handle_failure(self, agent_def: AgentDefinition, goal: str,
                        context: str, prev_result: DispatcherResult,
@@ -278,6 +339,48 @@ class Dispatcher:
         )
 
         return "\n".join(parts)
+
+    # ── MCP Tool Resolution ──
+
+    def _resolve_mcp_tools(self, agent_def: AgentDefinition,
+                           goal: str, context: str) -> str:
+        """
+        Pre-fetch MCP tool results for the agent and return as formatted context.
+
+        Calls each tool defined in agent_def.mcp_tools and formats
+        the results as structured sections for LLM injection.
+        Returns empty string if no MCP tools are configured or no MCP manager.
+        """
+        if not agent_def.mcp_tools or not self.mcp:
+            return ""
+
+        sections = []
+        for spec in agent_def.mcp_tools:
+            try:
+                result = self.mcp.call_tool_any(spec.tool, spec.params) if not spec.server \
+                    else self.mcp.call_tool(spec.server, spec.tool, spec.params)
+            except Exception as e:
+                msg = f"  [MCP Error: {e}]"
+                if spec.required:
+                    raise
+                sections.append(f"## {spec.label or spec.tool}\n{msg}")
+                continue
+
+            label = spec.label or spec.tool
+            text = result.text.strip()
+            if not text:
+                text = "(no output)"
+
+            # Truncate very long tool outputs to avoid blowing context
+            if len(text) > 4000:
+                text = text[:4000] + "\n... [truncated]"
+
+            sections.append(f"## {label}\n{text}")
+
+        if not sections:
+            return ""
+
+        return "## Pre-fetched Data (from MCP tools)\n" + "\n\n".join(sections)
 
     # ── Internal: Parsing ──
 

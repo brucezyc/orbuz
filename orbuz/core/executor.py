@@ -13,6 +13,7 @@ Execution patterns:
 """
 from __future__ import annotations
 import json
+from dataclasses import dataclass, field
 from pathlib import Path
 from orbuz.core.dispatcher import Dispatcher, DispatcherResult, merge_dedup_findings
 from orbuz.core.selector import select_personas, describe_team
@@ -21,6 +22,62 @@ from orbuz.workspace.manager import WorkspaceManager
 from orbuz.llm.client import LLMClient
 from orbuz.schema.agent import load_agent, ModelHint
 from orbuz.schema.finding import FindingSet, Finding, Severity, AutofixClass
+from orbuz.core.plugin import get_registry
+
+
+_plugins = get_registry()
+
+
+# ── Cost Tracker ──
+
+@dataclass
+class CostTracker:
+    """Tracks token usage and cost across a workflow run."""
+    total_input_tokens: int = 0
+    total_output_tokens: int = 0
+    total_cost_usd: float = 0.0
+    per_agent: dict[str, dict] = field(default_factory=dict)
+
+    def record(self, agent_name: str, in_tokens: int, out_tokens: int, cost_usd: float):
+        self.total_input_tokens += in_tokens
+        self.total_output_tokens += out_tokens
+        self.total_cost_usd += cost_usd
+        if agent_name not in self.per_agent:
+            self.per_agent[agent_name] = {
+                "calls": 0, "input_tokens": 0, "output_tokens": 0, "cost_usd": 0.0,
+            }
+        self.per_agent[agent_name]["calls"] += 1
+        self.per_agent[agent_name]["input_tokens"] += in_tokens
+        self.per_agent[agent_name]["output_tokens"] += out_tokens
+        self.per_agent[agent_name]["cost_usd"] += cost_usd
+
+    def record_result(self, agent_name: str, result: DispatcherResult):
+        """Record from a DispatcherResult."""
+        self.record(agent_name, result.tokens // 2, result.tokens // 2, result.cost_usd)
+
+    def summary(self) -> dict:
+        return {
+            "total_cost_usd": round(self.total_cost_usd, 4),
+            "total_input_tokens": self.total_input_tokens,
+            "total_output_tokens": self.total_output_tokens,
+            "total_tokens": self.total_input_tokens + self.total_output_tokens,
+            "per_agent": self.per_agent,
+        }
+
+    def summary_str(self) -> str:
+        s = self.summary()
+        lines = [
+            f"Cost: ${s['total_cost_usd']:.4f} | "
+            f"Tokens: {s['total_tokens']:,} "
+            f"({s['total_input_tokens']:,} in / {s['total_output_tokens']:,} out)"
+        ]
+        by_cost = sorted(s["per_agent"].items(), key=lambda x: x[1]["cost_usd"], reverse=True)
+        for name, stats in by_cost[:5]:
+            lines.append(f"  {name}: ${stats['cost_usd']:.4f} ({stats['calls']} calls, "
+                         f"{stats['input_tokens']+stats['output_tokens']:,} tokens)")
+        if len(by_cost) > 5:
+            lines.append(f"  ... and {len(by_cost) - 5} more agents")
+        return "\n".join(lines)
 
 
 class Executor:
@@ -45,13 +102,16 @@ class Executor:
         self.ws = WorkspaceManager()
         self.bus = None
         self._decision = None
+        self._cost_tracker = CostTracker()
 
     # ── Main entry ──
 
     def run(self):
         """Generator: yields events."""
-        stages = self.plan["plan"]["stages"]
-        run_id = self.ws.init_run(self.plan)
+        # ── Plugin hook: before_workflow ──
+        plan = _plugins.run("before_workflow", self.plan) or self.plan
+        stages = plan["plan"]["stages"]
+        run_id = self.ws.init_run(plan)
         self.bus = MessageBus(
             workspace_dir=str(self.ws.base / run_id)
         )
@@ -112,7 +172,18 @@ class Executor:
 
         # Done
         self.ws.set_state(run_id, "completed")
-        yield {"type": "done", "run_id": run_id, "output_path": f"_workspace/{run_id}/deliver/"}
+
+        cost_summary = self._cost_tracker.summary()
+
+        # ── Plugin hook: after_workflow ──
+        _plugins.run("after_workflow", {
+            "run_id": run_id,
+            "output_path": f"_workspace/{run_id}/deliver/",
+            "cost_summary": cost_summary,
+        })
+
+        yield {"type": "done", "run_id": run_id, "output_path": f"_workspace/{run_id}/deliver/",
+               "cost_summary": cost_summary}
 
     def continue_with(self, decision: dict):
         self._decision = decision
@@ -198,6 +269,7 @@ class Executor:
                 tier=agent_def.model_hint.tier,
                 require_structured_findings=True,
             )
+            self._cost_tracker.record_result(agent_def.name, result)
             self.ws.write_output(run_id, stage_id,
                                  f"{agent_def.name}", result.output)
 
@@ -312,6 +384,7 @@ class Executor:
                     tier=tier,
                     messages_from_bus=full_bus,
                 )
+                self._cost_tracker.record_result(role, result)
                 if not result.success:
                     result = self.dispatcher.handle_failure(defn, agent_cfg["goal"],
                                                              full_context, result, tier)
@@ -359,6 +432,7 @@ class Executor:
                 context="\n".join(merge_ctx_parts),
                 tier=merge_tier,
             )
+            self._cost_tracker.record_result("merge-agent", merge_result)
             self.ws.write_output(run_id, stage_id, "merged", merge_result.output)
             yield {"type": "progress", "stage": stage_id, "msg": "merge complete"}
 
@@ -401,6 +475,7 @@ class Executor:
                 context=prev_output if prev_output else "",
                 tier=tier,
             )
+            self._cost_tracker.record_result(agent_cfg["role"], result)
             if not result.success:
                 result = self.dispatcher.handle_failure(defn, agent_cfg["goal"],
                                                          prev_output, result, tier)
@@ -425,6 +500,7 @@ class Executor:
             p_defn = load_agent(producer["role"])
             p_tier = producer.get("model_assignment", {}).get("tier", "balanced")
             p_result = self.dispatcher.run_agent(p_defn, producer["goal"], tier=p_tier)
+            self._cost_tracker.record_result(producer["role"], p_result)
             self.ws.write_output(run_id, stage_id, f"{producer['role']}_v{cycle}", p_result.output)
             yield {"type": "progress", "stage": stage_id, "cycle": cycle, "msg": "produced"}
 
@@ -433,6 +509,7 @@ class Executor:
                 r_tier = reviewer.get("model_assignment", {}).get("tier", "balanced")
                 r_ctx = f"Review the following content:\n{p_result.output[:2000]}"
                 r_result = self.dispatcher.run_agent(r_defn, reviewer["goal"], r_ctx, tier=r_tier)
+                self._cost_tracker.record_result(reviewer["role"], r_result)
                 verdict = "PASS" if "PASS" in r_result.output else "FAIL"
                 yield {"type": "progress", "stage": stage_id, "cycle": cycle, "verdict": verdict}
                 if verdict == "PASS":

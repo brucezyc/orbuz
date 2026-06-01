@@ -5,7 +5,7 @@
     <code>orbuz run "topic" --quality-model claude-sonnet-4 --api-key sk-xxx</code>
   </p>
   <p align="center">
-    <a href="#quickstart">Quickstart</a> · <a href="#how-it-works">How it Works</a> · <a href="#execution-patterns">Patterns</a> · <a href="#agent-library">Agents</a>
+    <a href="#quickstart">Quickstart</a> · <a href="#how-it-works">How it Works</a> · <a href="#features">Features</a> · <a href="#agent-library">Agents</a>
   </p>
 </p>
 
@@ -44,36 +44,37 @@ The workflow will:
 ### Research Workflow
 
 ```
-┌──────────────────────────────────────────────────────┐
-│                    orbuz CLI                         │
-│  orbuz run "topic" --quality-model sonnet-4 ...      │
-└──────────────┬───────────────────────────────────────┘
-               │
-               ▼
-┌──────────────────────────────┐
-│  Phase 1: Recon              │  ← Quality LLM analyzes topic,
-│  Orchestrator → plan.json    │     selects agents, designs plan
-└──────────────┬───────────────┘
+┌────────────────────────────────────────────────┐
+│                   orbuz CLI                    │
+│  orbuz run "topic" --quality sonnet-4 ...      │
+└───────────────────────┬────────────────────────┘
+                        │
+                        ▼
+┌──────────────────────────────────┐
+│  Phase 1: Recon                  │
+│  Orchestrator → plan.json        │
+└──────────────┬───────────────────┘
                │ User approves
                ▼
-┌──────────────────────────────┐
-│  Phase 2: Execute            │
-│  ┌── Stage 1: Fanout ────┐  │  ← Parallel agents with MessageBus
-│  │  Official Researcher   │  │     claims routing between rounds
-│  │  Media Researcher      │──│──→ Shared folder for cross-agent data
-│  │  Background Researcher │  │
-│  └─────────┬──────────────┘  │
-│            ▼                 │
-│  ┌── Merge ──────────────┐  │
-│  │  merge-agent           │  │  ← Synthesizes parallel outputs
-│  └─────────┬──────────────┘  │
-│            │ Checkpoint      │  ← You decide: continue / redirect / rerun
-│            ▼                 │
-│  ┌── Stage 2: Pipeline ──┐  │
-│  │  Synthesizer           │  │  ← Final report
-│  └─────────┬──────────────┘  │
-└────────────┼────────────────┘
-             ▼
+┌──────────────────────────────────┐
+│  Phase 2: Execute                │
+│                                  │
+│  ┌── Stage 1: Fanout ─────────┐  │
+│  │  Official Researcher       │  │
+│  │  Media Researcher          │  │
+│  │  Background Researcher     │  │
+│  └────────┬───────────────────┘  │
+│             ▼                    │
+│  ┌── Merge ───────────────────┐  │
+│  │  merge-agent               │  │
+│  └────────┬───────────────────┘  │
+│             │ Checkpoint         │
+│             ▼                    │
+│  ┌── Stage 2: Pipeline ───────┐  │
+│  │  Synthesizer               │  │
+│  └────────┬───────────────────┘  │
+└───────────┼──────────────────────┘
+            ▼
   _workspace/{run_id}/deliver/
 ```
 
@@ -94,6 +95,7 @@ orbuz run "Review current branch" --workflow code-review
 
 ── Stage 3: Parallel Dispatch ──
   Each persona returns structured JSON findings
+  (uses response_format for guaranteed valid JSON)
 
 ── Stage 4: Merge + Dedup ──
   Dedup by (file, line, title) — higher severity wins
@@ -104,6 +106,152 @@ orbuz run "Review current branch" --workflow code-review
 ```
 
 Personas are selected automatically based on diff content. An auth-related change triggers ~12 reviewers; a simple doc change triggers 7 always-on reviewers only.
+
+## Features
+
+### Structured JSON Output
+
+orbuz uses API-level `response_format` (`json_object`) for structured findings agents — no more regex-based JSON extraction. The LLM is forced to return valid JSON conforming to the findings schema:
+
+```python
+# Automatic: code review agents use response_format when the model supports it
+# Falls back to regex extraction for Anthropic (no native json_object support)
+result = dispatcher.run_agent(agent_def, goal, require_structured_findings=True)
+```
+
+### MCP Tool Integration
+
+Agents can declare MCP (Model Context Protocol) tools to pre-fetch before the LLM call — real data instead of guesswork. MCP servers connect via stdio or HTTP/SSE.
+
+```yaml
+# In agent YAML definition
+name: media-researcher
+mcp_tools:
+  - tool: web_search
+    params:
+      query: "{topic} latest news"
+    required: false
+    label: Web Search Results
+  - tool: web_fetch
+    params:
+      url: "{source_url}"
+    required: false
+    label: Source Content
+```
+
+Results are injected into the agent's context as structured sections before the LLM call. Tools with `required: true` cause the agent run to fail on error; `required: false` tools degrade gracefully.
+
+**MCP server config** is defined in `mcp_servers.yaml`:
+
+```yaml
+servers:
+  web:
+    transport: stdio
+    command: ["npx", "@mcp/web-search"]
+  fetch:
+    transport: http
+    url: "http://localhost:3000/mcp"
+```
+
+Supported transports:
+- **stdio** — subprocess with JSON-lines protocol
+- **HTTP/SSE** — remote MCP servers via SSE events + HTTP POST
+- **auto-discovery** — tool listing via `tools/list`, caching with 60s TTL
+
+### Streaming Support
+
+All LLM calls use httpx under the hood (replaced urllib). Streaming is available via the `stream=True` + `on_chunk` callback:
+
+```python
+# Streaming with progress callback (for TUI/CLI)
+resp = client.chat("balanced", system, messages,
+                    stream=True,
+                    on_chunk=lambda chunk: print(chunk, end="", flush=True))
+```
+
+### Cost Tracking
+
+Every agent run records token usage and estimated cost. Summary shown at workflow completion:
+
+```
+✅ Done. Output: _workspace/abc123/deliver/
+   💰 $0.0950 | 8,250 tokens total
+      deep-researcher: $0.0420 (2 calls)
+      media-researcher: $0.0300 (1 calls)
+      merge-agent: $0.0230 (1 calls)
+```
+
+Costs are estimated from built-in per-model pricing cards (Opus, Sonnet, DeepSeek, GPT, Gemini). The `CostTracker` class aggregates per-agent and workflow-level costs.
+
+### Cross-Run Agent Memory
+
+Learnings from agent runs persist to disk and are queryable in future runs. Inspired by Compound Engineering's learnings-researcher and session-historian agents:
+
+```python
+from orbuz.agent.memory import AgentMemory
+
+memory = AgentMemory("_workspace/.memory/learnings.json")
+memory.record_learning(
+    agent="ce-security-reviewer",
+    topic="SQL injection prevention",
+    finding="Use parameterized queries, never string interpolation",
+    tags=["security", "sql"],
+)
+# Later: retrieve relevant learnings
+results = memory.query(["sql", "security"])
+```
+
+Memory is stored as JSON and supports keyword search, agent-scoped queries, and confidence scoring.
+
+### Agent Output Evaluation
+
+Built-in quality checks for agent outputs:
+
+- **Empty/short output detection** — flags degenerate responses
+- **Repetition detection** — catches looping/hallucinating outputs
+- **Hallucination markers** — flags common AI disclaimers
+- **Finding schema validation** — checks severity, confidence range, required fields
+
+```python
+from orbuz.core.eval import evaluate_agent
+
+result = evaluate_agent("security-reviewer", output, findings)
+print(result.summary())  # "Score: 0.85 | Warnings (1): Missing file in finding..."
+```
+
+### Plugin System
+
+Lifecycle hooks for extending orbuz without forking:
+
+| Hook Point | Signature | Type |
+|---|---|---|
+| `before_agent_run` | `(context, goal, agent_def) -> context` | Transforming |
+| `after_agent_run` | `(agent_def, result) -> None` | Fire-and-forget |
+| `before_workflow` | `(plan) -> plan` | Transforming |
+| `after_workflow` | `(summary) -> None` | Fire-and-forget |
+| `before_mcp_call` | `(server_name, tool_name, args) -> args` | Transforming |
+| `after_mcp_call` | `(server_name, tool_name, result) -> None` | Fire-and-forget |
+| `on_error` | `(error) -> None` | Fire-and-forget |
+
+```python
+from orbuz.core.plugin import hook
+
+@hook("before_agent_run")
+def enrich_context(context, goal, agent_def):
+    """Add extra data to every agent's context."""
+    enriched = context + "\n## System Info\nOS: Linux, Python 3.10+"
+    return enriched
+```
+
+Plugins are auto-discovered from `plugins/`, `.orbuz/plugins/`, or `~/.config/orbuz/plugins/`.
+
+### HTTP Transport (httpx)
+
+Replaced raw urllib with httpx for all API calls:
+- Connection pooling across calls
+- Proper timeout handling (connect + read + write)
+- Follow redirects
+- Streaming SSE support for both OpenAI-compatible and Anthropic endpoints
 
 ## Execution Patterns
 
@@ -141,7 +289,7 @@ Code review agents produce **structured findings** with a standard schema:
 - Severity: **P0** (critical) → **P3** (minor)
 - autofix_class: routes findings to auto-fix, manual fix, or advisory
 - Merge-dedup: deduplicates by (file, line, title), higher severity wins
-- Confidence gate: findings below 0.3 are gated
+- Confidence gate: findings below 0.3 are gated when using `response_format` mode, the JSON is guaranteed by the API not regex
 
 ## Agent Library
 
@@ -236,24 +384,24 @@ orbuz run "Review auth refactor" --workflow code-review --agent-dir agents
 
 Model IDs use the format `<provider>/<model>` — the provider prefix auto-selects the API format:
 
-| Model ID | Provider | Endpoint | API Format | Tier |
-|----------|----------|----------|-----------|------|
-| `anthropic/claude-opus-4-8` | Anthropic | `api.anthropic.com` | `anthropic/messages` | High |
-| `anthropic/claude-sonnet-4-6` | Anthropic | `api.anthropic.com` | `anthropic/messages` | Mid |
-| `anthropic/claude-haiku-4-5` | Anthropic | `api.anthropic.com` | `anthropic/messages` | Low |
-| `deepseek/deepseek-v4-pro` | DeepSeek | `api.deepseek.com` | `openai/completions` | High |
-| `deepseek/deepseek-v4-flash` | DeepSeek | `api.deepseek.com` | `openai/completions` | Low |
-| `openai/gpt-5.5` | OpenAI | `api.openai.com` | `openai/completions` | High |
-| `openai/gpt-5.4-mini` | OpenAI | `api.openai.com` | `openai/completions` | Low |
-| `google/gemini-3.1-pro-preview` | Google | `generativelanguage.googleapis.com` | `openai/completions` | High |
-| `google/gemini-3.1-flash-lite` | Google | `generativelanguage.googleapis.com` | `openai/completions` | Low |
-| `openrouter/auto` | OpenRouter | `openrouter.ai` | `openai/completions` | Router |
+| Model ID | Provider | API Format | Tier |
+|----------|----------|-----------|------|
+| `anthropic/claude-opus-4-8` | Anthropic | `anthropic/messages` | High |
+| `anthropic/claude-sonnet-4-6` | Anthropic | `anthropic/messages` | Mid |
+| `anthropic/claude-haiku-4-5` | Anthropic | `anthropic/messages` | Low |
+| `deepseek/deepseek-v4-pro` | DeepSeek | `openai/completions` | High |
+| `deepseek/deepseek-v4-flash` | DeepSeek | `openai/completions` | Low |
+| `openai/gpt-5.5` | OpenAI | `openai/completions` | High |
+| `openai/gpt-5.4-mini` | OpenAI | `openai/completions` | Low |
+| `google/gemini-3.1-pro-preview` | Google | `openai/completions` | High |
+| `google/gemini-3.1-flash-lite` | Google | `openai/completions` | Low |
+| `openrouter/auto` | OpenRouter | `openai/completions` | Router |
 
 Provider keys are resolved from: `--<tier>-api-key` → `ANTHROPIC_API_KEY` / `DEEPSEEK_API_KEY` → `--api-key`.
 
 ### Catalog
 
-orbuz ships with a built-in model catalog (`orbuz/llm/catalog.py`) that knows 6 providers and 12 default models (Opus 4.8, Sonnet 4.6, Haiku 4.5, DeepSeek V4 Pro/Flash, GPT-5.5, GPT-5.4-mini, Gemini 3.1 Pro/Flash Lite, OpenRouter). The catalog resolves provider configs (endpoint type, base URL, headers) and merges them with model-level overrides — inspired by OpenCode's plugin-based provider system.
+orbuz ships with a built-in model catalog (`orbuz/llm/catalog.py`) that knows 6 providers and 12 default models. The catalog resolves provider configs (endpoint type, base URL, headers) and merges them with model-level overrides.
 
 ```python
 from orbuz.llm.catalog import Catalog
@@ -284,10 +432,13 @@ Resolution: `ORBUZ_API_KEY_<TIER>` → `ANTHROPIC_API_KEY` → `DEEPSEEK_API_KEY
 
 - Python 3.10+
 - An LLM API key (Anthropic, DeepSeek, or any API provider)
+- MCP server(s) for tool integration (optional)
 
 ## Design Notes
 
 orbuz's code review system is inspired by the [Compound Engineering Plugin](https://github.com/EveryInc/compound-engineering-plugin) (18.3k ★). The model routing layer (provider catalog, endpoint types, resolution chain) is adapted from [OpenCode](https://github.com/anomalyco/opencode)'s plugin-based provider system.
+
+The MCP client module (`orbuz/mcp/client.py`) implements the [Model Context Protocol](https://modelcontextprotocol.io/) with native stdio and HTTP/SSE transport — no external dependencies beyond httpx.
 
 ## License
 
