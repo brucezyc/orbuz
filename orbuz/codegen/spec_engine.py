@@ -217,6 +217,15 @@ class SpecEngine:
             actions_desc.append(f"- [{a.action}] {a.name}: {a.description}")
         spec_desc = "\n".join(actions_desc)
 
+        # 项目知识注入
+        knowledge_block = ""
+        knowledge = self.context.get("knowledge", {})
+        if knowledge:
+            knowledge_block = (
+                f"\n\n### 项目架构规则（必须遵守）\n"
+                f"{knowledge['content']}"
+            )
+
         prompt = (
             f"## 目标\n"
             f"根据以下 spec 更新文件 `{file_path}`:\n\n"
@@ -227,7 +236,8 @@ class SpecEngine:
             f"### 项目上下文\n"
             f"{project_summary}\n\n"
             f"### 项目文件结构\n"
-            f"```\n{project_files}\n```\n\n"
+            f"```\n{project_files}\n```"
+            f"{knowledge_block}\n\n"
             f"## 要求\n"
             f"1. 只修改/生成 `{file_path}` 的内容\n"
             f"2. 保持项目中其他文件的兼容性\n"

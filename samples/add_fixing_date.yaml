@@ -1,0 +1,35 @@
+# =============================================
+# RustPricer Spec 模板
+# 用法: orbuz codegen --project-dir . --spec spec.yaml \
+#       --project-context on --compile-loop on
+# =============================================
+
+title: "IborIndex 添加 fixing_date 方法"
+description: >
+  在 IborIndex trait 上添加 fixing_date 方法，
+  补齐 BuiltinIndex 和 CustomIndex 的 impl，
+  更新 SwapPricer 和 FraPricer 使用新方法。
+
+actions:
+  - action: add_method
+    target: IborIndex
+    name: fixing_date
+    signature: "fn fixing_date(&self, spot: Date) -> Date"
+    description: "计算给定起息日(spot)的 fixing date"
+    affected_traits: []
+    affected_types: [BuiltinIndex, CustomIndex]
+
+  - action: modify
+    target: SwapPricer
+    name: use_fixing_date
+    description: "SwapPricer 使用 IborIndex::fixing_date 替换内联日期计算"
+    affected_types: [Swap]
+
+  - action: modify
+    target: FraPricer
+    name: use_fixing_date
+    description: "FraPricer 使用 IborIndex::fixing_date"
+    affected_types: [Fra]
+
+requires_oracle: true
+oracle_command: "cargo test --test ibor_tests -- --exact fixing_date"

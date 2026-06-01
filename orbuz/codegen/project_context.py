@@ -103,6 +103,11 @@ def build_project_context(
     # 生成简短摘要
     result["summary"] = _summarize(result)
 
+    # 附加项目知识文档（架构规则/约定）
+    result["knowledge"] = build_knowledge_context(root)
+    if result["knowledge"]:
+        result["summary"] += f" | 知识: {result['knowledge']['file_count']} 文件"
+
     return result
 
 
@@ -154,6 +159,95 @@ def _git_status(root: Path) -> dict:
         }
     except Exception:
         return {}
+
+
+# ── 知识文档自动发现 ──
+
+KNOWLEDGE_CANDIDATES = [
+    "CODEGEN.md",         # 最优先：显式的代码生成规则
+    "CODEGEN.yaml",       # YAML 格式的代码生成规则
+    "CODEGEN.yml",
+    ".orbuz/knowledge.md",  # orbuz 专用知识目录
+    ".orbuz/rules.md",
+    "ARCHITECTURE.md",    # 架构文档（项目通用）
+    "ARCHITECTURE.yaml",
+    "DESIGN.md",          # 设计文档
+    "AGENTS.md",          # Claude Code/Cursor 风格的 agent 指令
+    "CLAUDE.md",
+    ".cursorrules",
+]
+
+
+def find_knowledge_files(project_dir: Path) -> list[tuple[Path, str]]:
+    """
+    在项目根目录搜索知识文档文件。
+
+    返回: [(文件路径, 文件名), ...]
+    按 KNOWLEDGE_CANDIDATES 优先级排序。
+    """
+    found = []
+    for name in KNOWLEDGE_CANDIDATES:
+        fpath = project_dir / name
+        if fpath.exists() and fpath.is_file():
+            # 跳过空文件
+            try:
+                size = fpath.stat().st_size
+                if size > 0:
+                    found.append((fpath, name))
+            except OSError:
+                continue
+    return found
+
+
+def build_knowledge_context(project_dir: Path) -> dict:
+    """
+    扫描项目根目录 → 读取并拼接所有知识文档。
+
+    返回:
+    {
+        "file_count": 2,
+        "files": ["CODEGEN.md", ".orbuz/rules.md"],
+        "content": "## Architecture Rules\\n...",
+        "prompt_block": "# 项目知识\\n## 来自 CODEGEN.md\\n...",
+    }
+    如果没有发现知识文档，返回空 dict。
+    """
+    found = find_knowledge_files(project_dir)
+    if not found:
+        return {}
+
+    files_info = []
+    content_parts = []
+
+    for fpath, fname in found:
+        try:
+            text = fpath.read_text(encoding="utf-8", errors="replace").strip()
+            if text:
+                files_info.append(fname)
+                content_parts.append(f"## 来自 {fname}\n{text}")
+        except Exception:
+            continue
+
+    if not content_parts:
+        return {}
+
+    block = "# 项目知识\n" + "\n\n".join(content_parts)
+
+    return {
+        "file_count": len(files_info),
+        "files": files_info,
+        "content": block,
+    }
+
+
+def get_knowledge_prompt_block(project_dir: str | Path) -> str:
+    """
+    快速接口：给定项目路径 → 返回知识文档的 prompt 注入块。
+    未发现时返回空字符串。
+    """
+    root = Path(project_dir).expanduser().resolve()
+    ctx = build_knowledge_context(root)
+    return ctx.get("content", "")
 
 
 # ── Rust Scanner ──

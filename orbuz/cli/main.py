@@ -371,6 +371,17 @@ def _cmd_codegen(args):
         if not lang:
             lang = "rust"  # default fallback
 
+    # ── 1b. Show knowledge if found and context was scanned ──
+
+    if project_ctx:
+        knowledge = project_ctx.get("knowledge", {})
+        if knowledge:
+            print(f"  Knowledge: {knowledge['file_count']} file(s) loaded")
+            for fname in knowledge['files']:
+                print(f"    📖 {fname}")
+        else:
+            print(f"  Knowledge: 无项目知识文件（可选: 放 CODEGEN.md 或 .orbuz/knowledge.md）")
+
     # ── 2. Spec / Goal ──
 
     spec_plan = None
