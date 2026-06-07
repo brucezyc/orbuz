@@ -245,3 +245,8 @@ agents:
     summary: "Codegen reporter: summary of generated files, compile status, and next steps"
     tags: [codegen, report, summary]
     file: codegen-reporter.yaml
+
+  - name: codegen-inspector
+    summary: "Codegen inspector: scan + compile check → report what to do next"
+    tags: [codegen, inspect, resume, check]
+    file: codegen-inspector.yaml

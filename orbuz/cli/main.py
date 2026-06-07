@@ -117,14 +117,14 @@ def main():
                      help="Comma-separated tool names for guardrail validation")
     run.add_argument("--workflow-name", default=None, help="Workflow name (default: auto)")
     run.add_argument("--agent-dir", default=None, help="Agent YAML directory")
-    run.add_argument("--mode", default=None, choices=["codegen"],
-                     help="Workflow mode (codegen = code generation workflow)")
+    run.add_argument("--resume", action="store_true",
+                     help="Resume: load last workspace state and continue from where it left off")
     run.add_argument("--project-dir", default=None,
-                     help="Project directory (required for --mode codegen)")
+                     help="Project directory hint (for code generation workflows)")
     run.add_argument("--goal", default="",
-                     help="Natural language goal (for --mode codegen)")
-    run.add_argument("--language", default="rust",
-                     help="Programming language (for --mode codegen, default: rust)")
+                     help="Specific goal (overrides topic for targeted tasks)")
+    run.add_argument("--language", default=None,
+                     help="Language hint (rust/python/cpp, auto-detected if omitted)")
 
     # orbuz status
     sub.add_parser("status", help="View run status")
@@ -198,6 +198,7 @@ def main():
 
 
 def _cmd_run(args):
+    import json
     from pathlib import Path
     from orbuz.core.orchestrator import Orchestrator
     from orbuz.core.executor import Executor
@@ -242,46 +243,40 @@ def _cmd_run(args):
         print("     Pass --api-key (or set ANTHROPIC_API_KEY / DEEPSEEK_API_KEY)")
         print("     Example: orbuz run \"topic\" --quality-model anthropic/claude-opus-4-8 --api-key sk-...")
 
-    # ── Codegen mode: skip Orchestrator, build plan directly ──
-    if args.mode == "codegen":
-        proj_dir = args.project_dir or args.topic  # fallback: topic as project dir
-        goal = args.goal or f"Create project skeleton at {proj_dir}"
-        plan = {
-            "workflow": {"name": "codegen", "description": f"Codegen: {goal[:60]}"},
-            "recon_summary": {
-                "topic": goal,
-                "complexity": "moderate",
-                "key_findings": [],
-                "estimated_total_seconds": 300,
-                "estimated_total_tokens": 50000,
-            },
-            "plan": {
-                "stages": [
-                    {
-                        "id": "01_codegen",
-                        "name": "Code Generation",
-                        "pattern": "codegen",
-                        "goal": goal,
-                        "project_dir": proj_dir,
-                        "language": args.language,
-                        "agents": [],
-                    }
-                ]
-            },
-            "alternatives_considered": [],
-            "generated_at": None,
-        }
-        print(f"\n🔧 Codegen mode: generating {args.language} project at {proj_dir}")
-        print(f"   Goal: {goal[:120]}")
-        print(f"   Agents: codegen-planner → codegen-writer (parallel) → codegen-compiler → codegen-reporter")
-        approved = True  # Auto-approve in codegen mode
+    # ── Resume mode: load last workspace, skip Orchestrator ──
+    if args.resume:
+        from orbuz.workspace.manager import WorkspaceManager as WSMgr
+        resume_mgr = WSMgr()
+        run_id = resume_mgr.read_current_run_id()
+        if not run_id:
+            print("  ❌ No previous run to resume. Run orbuz run first without --resume.")
+            return
+        status = resume_mgr.read_current_status()
+        if not status:
+            print(f"  ❌ Run {run_id} has no status. Cannot resume.")
+            return
+        if status.get("state") == "completed":
+            print(f"  ✅ Run {run_id} already completed. No need to resume.")
+            return
+
+        # Reconstruct plan from manifest
+        manifest_path = resume_mgr.base / run_id / "manifest.json"
+        plan = json.loads(manifest_path.read_text()) if manifest_path.exists() else {}
+        if not plan:
+            print(f"  ❌ Run {run_id} has no manifest. Cannot resume.")
+            return
+
+        print(f"  🔄 Resuming run {run_id} (stage {status.get('current_stage_index', 0)} of {len(plan.get('stages', []))})")
+        approved = True
+        resume_run_id = run_id
     else:
         # 1. Orchestrator does Recon -> plan.json
+        topic = args.goal or args.topic
         orch = Orchestrator(
             llm_client=llm,
             agent_dir=args.agent_dir,
         )
-        plan = orch.recon(topic=args.topic, workflow_name=args.workflow_name)
+        plan = orch.recon(topic=topic, workflow_name=args.workflow_name)
 
         # 2. Display plan -> wait for user approval
         print_plan(plan)
@@ -293,12 +288,16 @@ def _cmd_run(args):
         if not approved:
             print("Stop User rejected, exiting")
             return
+        resume_run_id = None
 
     # 3. Executor runs the plan
     exe = Executor(
         plan=plan,
         llm_client=llm,
     )
+
+    if resume_run_id:
+        exe.run_id = resume_run_id  # Attach existing run so workspace isn't re-created
 
     for event in exe.run():
         if event["type"] == "checkpoint":
@@ -410,6 +409,7 @@ def _cmd_codegen(args):
         guardrails_tools=args.guardrails_tools,
         workflow_name="codegen",
         agent_dir=args.agent_dir,
+        resume=getattr(args, 'resume', False),
     )
     _cmd_run(run_args)
 

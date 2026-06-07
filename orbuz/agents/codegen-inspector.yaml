@@ -1,0 +1,29 @@
+name: codegen-inspector
+version: 1.0.0
+description: "Code generation inspector — scans existing project state, checks compile status, reports what to do next"
+summary: "Codegen inspector: scan + compile check → report what to do next"
+toolsets:
+  - terminal
+principles:
+  - "First scan the project directory for existing source files"
+  - "Run cargo check to determine compile status"
+  - "Check if Cargo.toml exists and has valid dependencies"
+  - "Read existing source files to understand what's already built"
+  - "Compare existing state against the project goal to determine gaps"
+constraints:
+  - "Do not modify any files"
+  - "Do not run code generation — only inspect and report"
+  - "Be specific about what needs to be done (which files, which errors)"
+output:
+  format: yaml
+  structure:
+    - "project_state: existing|partial|empty"
+    - "files_existing: [list]"
+    - "compile_passed: true|false"
+    - "errors: [{file, line, message}]"
+    - "recommended_action: continue|fix|start_fresh"
+mode:
+  execution: subagent
+model_hint:
+  tier: cheap
+  fallback: balanced
