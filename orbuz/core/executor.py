@@ -37,24 +37,32 @@ class CostTracker:
     total_input_tokens: int = 0
     total_output_tokens: int = 0
     total_cost_usd: float = 0.0
+    total_duration_s: float = 0.0
     per_agent: dict[str, dict] = field(default_factory=dict)
 
-    def record(self, agent_name: str, in_tokens: int, out_tokens: int, cost_usd: float):
+    def record(self, agent_name: str, in_tokens: int, out_tokens: int,
+               cost_usd: float, duration_s: float = 0.0, model: str = ""):
         self.total_input_tokens += in_tokens
         self.total_output_tokens += out_tokens
         self.total_cost_usd += cost_usd
+        self.total_duration_s += duration_s
         if agent_name not in self.per_agent:
             self.per_agent[agent_name] = {
-                "calls": 0, "input_tokens": 0, "output_tokens": 0, "cost_usd": 0.0,
+                "calls": 0, "input_tokens": 0, "output_tokens": 0,
+                "cost_usd": 0.0, "duration_s": 0.0, "models": [],
             }
         self.per_agent[agent_name]["calls"] += 1
         self.per_agent[agent_name]["input_tokens"] += in_tokens
         self.per_agent[agent_name]["output_tokens"] += out_tokens
         self.per_agent[agent_name]["cost_usd"] += cost_usd
+        self.per_agent[agent_name]["duration_s"] += duration_s
+        if model and model not in self.per_agent[agent_name]["models"]:
+            self.per_agent[agent_name]["models"].append(model)
 
     def record_result(self, agent_name: str, result: DispatcherResult):
         """Record from a DispatcherResult."""
-        self.record(agent_name, result.tokens // 2, result.tokens // 2, result.cost_usd)
+        self.record(agent_name, result.tokens // 2, result.tokens // 2,
+                    result.cost_usd, result.duration_s, result.model_used)
 
     def summary(self) -> dict:
         return {
@@ -127,6 +135,72 @@ class Executor:
             "error": result.error[:200] if result.error else None,
             "claims": len(result.claims),
         }
+
+    def _generate_summary(self) -> str:
+        """Generate a task summary markdown from plan and cost tracker."""
+        s = self._cost_tracker.summary()
+        plan = self.plan
+        stages = plan.get("plan", plan).get("stages", plan.get("stages", []))
+        task_name = plan.get("workflow", {}).get("name", plan.get("name", "unnamed"))
+        task_desc = plan.get("workflow", {}).get("description", "")
+
+        lines = []
+        lines.append(f"# Task Summary: {task_name}")
+        if task_desc:
+            lines.append(f"\n> {task_desc}")
+        lines.append("")
+
+        # Task decomposition
+        lines.append("## Task Decomposition")
+        for stage in stages:
+            sid = stage.get("id", "?")
+            pattern = stage.get("pattern", "?")
+            agents = stage.get("agents", stage.get("tasks", []))
+            if not agents:
+                agents = stage.get("review_agents", [])
+                if agents:
+                    lines.append(f"\n- **Stage `{sid}`** ({pattern}): {len(agents)} reviewers")
+                    for a in agents:
+                        if isinstance(a, str):
+                            lines.append(f"  - `{a}`")
+                        else:
+                            lines.append(f"  - `{a.get('role','?')}` — {a.get('goal','')[:100]}")
+                else:
+                    lines.append(f"\n- **Stage `{sid}`** ({pattern})")
+                continue
+            lines.append(f"\n- **Stage `{sid}`** ({pattern}): {len(agents)} agents")
+            for a in agents:
+                role = a.get("role", "?")
+                goal = a.get("goal", "")
+                if goal:
+                    lines.append(f"  - `{role}` — {goal[:150]}")
+                else:
+                    lines.append(f"  - `{role}`")
+
+        # Cost summary
+        lines.append("\n## Cost & Token Usage")
+        lines.append(f"\n**Total:** ${s['total_cost_usd']:.4f} | "
+                     f"Tokens: {s['total_tokens']:,} "
+                     f"({s['total_input_tokens']:,} in / {s['total_output_tokens']:,} out) | "
+                     f"Duration: {self._cost_tracker.total_duration_s:.1f}s")
+        lines.append("")
+        per_agent = s.get("per_agent", {})
+        if per_agent:
+            lines.append("| Agent | Calls | Input | Output | Cost | Duration |")
+            lines.append("|---|---|---|---|---|---|")
+            for name, stats in sorted(per_agent.items(),
+                                      key=lambda x: -x[1].get("cost_usd", 0)):
+                inp = stats.get("input_tokens", 0)
+                out = stats.get("output_tokens", 0)
+                cost = stats.get("cost_usd", 0)
+                dur = stats.get("duration_s", stats.get("duration", 0))
+                lines.append(f"| `{name}` | {stats.get('calls',0)} | {inp:,} | {out:,} | "
+                             f"${cost:.4f} | {dur:.1f}s |")
+        else:
+            # Fallback: read from per-agent meta files
+            pass
+
+        return "\n".join(lines) + "\n"
 
     def run(self):
         """Generator: yields events."""
@@ -236,8 +310,13 @@ class Executor:
         # Persist cost summary to workspace
         self.ws.write_cost_summary(run_id, cost_summary)
 
+        # Generate and persist task summary
+        summary_md = self._generate_summary()
+        summary_path = self.ws.base / run_id / "summary.md"
+        summary_path.write_text(summary_md)
+
         yield {"type": "done", "run_id": run_id, "output_path": f"_workspace/{run_id}/deliver/",
-               "cost_summary": cost_summary}
+               "cost_summary": cost_summary, "summary": summary_md}
 
     def continue_with(self, decision: dict):
         self._decision = decision
