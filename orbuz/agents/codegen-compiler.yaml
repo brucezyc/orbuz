@@ -17,6 +17,8 @@ constraints:
   - "You have access to these tools: terminal (run cargo check), write_file (write fixes), read_file (read source files)"
   - "Use terminal('cargo check') to compile. Use write_file to apply fixes. Use read_file to read error files."
   - "After all fixes, run cargo check one final time and report the exit code"
+  - "WHEN DONE: output a clear final report in your response text saying PASS/FAIL"
+  - "Do NOT keep calling tools after cargo check passes — output your final text report instead"
   - "Final output must include: compile status (PASS/FAIL), how many iterations, and the final cargo check output"
 output:
   format: text

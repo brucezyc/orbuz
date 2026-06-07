@@ -203,7 +203,7 @@ class Dispatcher:
         messages_from_bus: str = "",
         tools: list[dict] | None = None,
         project_path: str | None = None,
-        max_tool_rounds: int = 10,
+        max_tool_rounds: int = 25,
     ) -> DispatcherResult:
         """
         Run a sub-agent with native function calling (tool loop).
