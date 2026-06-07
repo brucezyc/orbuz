@@ -736,6 +736,36 @@ class Executor:
                         yield {'type': 'progress', 'stage': stage_id,
                                'msg': f'    {a.get("type","?")}: {a.get("path","") or a.get("command","")} [{status}]'}
                     all_results.extend(results)
+                else:
+                    # Mode 2: Dispatch agent via LLM, parse actions from output
+                    yield {'type': 'progress', 'stage': stage_id,
+                           'msg': f'  {role}: dispatching LLM agent...'}
+                    defn = load_agent(role)
+                    tier = agent_cfg.get('model_assignment', {}).get('tier', 'balanced')
+                    project_ctx = f"## Project Location\nProject root: {project_path}\n"
+                    try:
+                        files = list(project_path.rglob('*'))
+                        ignore = {'target', '.git', '.cargo', '_workspace'}
+                        flist = []
+                        for f in sorted(files):
+                            if f.is_file() and not any(p in ignore for p in f.parts):
+                                rel = f.relative_to(project_path)
+                                flist.append(f"  {rel}  ({f.stat().st_size} bytes)")
+                        if flist:
+                            project_ctx += "## Project Files\n" + "\n".join(flist) + "\n"
+                    except Exception:
+                        pass
+                    result = self.dispatcher.run_agent(
+                        defn, agent_cfg['goal'],
+                        context=project_ctx.strip(),
+                        tier=tier,
+                    )
+                    self._cost_tracker.record_result(role, result)
+                    self.ws.write_output(run_id, stage_id, role, result.output)
+                    actions = self._exec_actions(result.output, project_path)
+                    if actions:
+                        yield {'type': 'progress', 'stage': stage_id,
+                               'msg': f'  -> executed {len(actions)} actions from {role}'}
             yield {'type': 'progress', 'stage': stage_id,
                    'msg': f'  done: {sum(1 for r in all_results if r.get("exit_code",0)==0 or "path" in r)}/{len(all_results)} actions OK'}
         else:
