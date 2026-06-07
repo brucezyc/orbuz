@@ -333,8 +333,13 @@ class Dispatcher:
                 all_claims.extend(claims)
                 all_output_parts.append(resp.content)
 
-            # If no tool calls, this is the final response
+            # If no tool calls, this is the final response (usually)
             if not resp.tool_calls:
+                # Force retry: agent has tools but didn't use them — push back
+                if agent_def.toolsets and round_num == 0:
+                    messages.append({"role": "assistant", "content": resp.content or ""})
+                    messages.append({"role": "user", "content": "You have tools available but did not call any. You MUST use the terminal function to execute commands. Call the function now."})
+                    continue
                 return DispatcherResult(
                     success=True,
                     output="\n\n".join(all_output_parts) or "",
