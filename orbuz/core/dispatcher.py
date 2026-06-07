@@ -197,6 +197,128 @@ class Dispatcher:
 
         return result
 
+    def run_agent_with_tools(
+        self, agent_def: AgentDefinition, goal: str,
+        context: str = "", tier: str = "balanced",
+        messages_from_bus: str = "",
+        tools: list[dict] | None = None,
+        project_path: str | None = None,
+        max_tool_rounds: int = 10,
+    ) -> DispatcherResult:
+        """
+        Run a sub-agent with native function calling (tool loop).
+
+        Instead of requiring the agent to output ---actions--- blocks,
+        this method:
+          1. Calls the LLM with tool schemas
+          2. If the LLM calls a tool, executes it and feeds the result back
+          3. Repeats until the LLM responds with content (no tool calls)
+
+        Args:
+            tools: OpenAI-format tool schemas (from orbuz.codegen.tools.TOOL_SCHEMAS)
+            project_path: Project root for file/terminal tool resolution
+            max_tool_rounds: Max tool-call iterations (safety limit)
+        """
+        from orbuz.codegen.tools import dispatch as tool_dispatch
+        from orbuz.codegen.tools import set_default_project_path
+
+        if project_path:
+            set_default_project_path(project_path)
+
+        model_name = self.llm.get_model_name(tier)
+        system = self._build_system_prompt(agent_def)
+
+        mcp_context = self._resolve_mcp_tools(agent_def, goal, context)
+        full_context = context
+        if mcp_context:
+            full_context = (context + "\n\n" + mcp_context) if context else mcp_context
+
+        user = self._build_user_prompt(agent_def, goal, full_context, messages_from_bus)
+
+        messages: list[dict] = [{"role": "user", "content": user}]
+        total_in_tokens = 0
+        total_out_tokens = 0
+        total_cost = 0.0
+        all_claims: list[dict] = []
+        tool_calls_made = 0
+
+        for round_num in range(max_tool_rounds):
+            resp = self.llm.chat(
+                model_tier=tier,
+                system=system,
+                messages=messages,
+                tools=tools,
+            )
+
+            total_in_tokens += resp.input_tokens
+            total_out_tokens += resp.output_tokens
+            total_cost += resp.cost_usd
+
+            if not resp.success:
+                return DispatcherResult(
+                    success=False,
+                    output=resp.content,
+                    error=resp.error or "LLM call failed",
+                    tier_used=tier,
+                    model_used=model_name,
+                    tokens=total_in_tokens + total_out_tokens,
+                    cost_usd=total_cost,
+                )
+
+            # Extract claims from any content produced
+            if resp.content:
+                claims = self._extract_claims(resp.content, agent_def.name)
+                all_claims.extend(claims)
+
+            # If no tool calls, this is the final response
+            if not resp.tool_calls:
+                return DispatcherResult(
+                    success=True,
+                    output=resp.content or "",
+                    claims=all_claims,
+                    tier_used=tier,
+                    model_used=model_name,
+                    tokens=total_in_tokens + total_out_tokens,
+                    cost_usd=total_cost,
+                )
+
+            # Append assistant message with tool_calls
+            assistant_msg = {
+                "role": "assistant",
+                "content": resp.content or "",
+                "tool_calls": resp.tool_calls,
+            }
+            messages.append(assistant_msg)
+
+            # Execute each tool call
+            for tc in resp.tool_calls:
+                tool_calls_made += 1
+                name = tc["function"]["name"]
+                try:
+                    args = json.loads(tc["function"]["arguments"])
+                except (json.JSONDecodeError, TypeError):
+                    args = {}
+
+                result = tool_dispatch(name, args, project_path=project_path)
+
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": tc["id"],
+                    "name": name,
+                    "content": result,
+                })
+
+        # Exceeded max rounds — return whatever we have
+        return DispatcherResult(
+            success=True,
+            output="[Reached max tool rounds]",
+            claims=all_claims,
+            tier_used=tier,
+            model_used=model_name,
+            tokens=total_in_tokens + total_out_tokens,
+            cost_usd=total_cost,
+        )
+
     def handle_failure(self, agent_def: AgentDefinition, goal: str,
                        context: str, prev_result: DispatcherResult,
                        failed_tier: str = "") -> DispatcherResult:

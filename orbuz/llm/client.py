@@ -46,6 +46,8 @@ class LLMResponse:
     success: bool = True
     error: str | None = None
     cost_usd: float = 0.0
+    tool_calls: list[dict] | None = None
+    finish_reason: str | None = None
 
 
 # ── Cost tracking ──
@@ -212,7 +214,8 @@ class LLMClient:
              max_tokens: int = 4096,
              stream: bool = False,
              on_chunk: Callable[[str], None] | None = None,
-             response_format: dict | None = None) -> LLMResponse:
+             response_format: dict | None = None,
+             tools: list[dict] | None = None) -> LLMResponse:
         """
         Call the LLM.
 
@@ -238,17 +241,18 @@ class LLMClient:
         if self.guardrails_enabled and self._guardrails:
             return self._chat_with_guardrails(
                 model_id, system, messages, temperature, max_tokens,
-                stream, on_chunk, response_format, resolved,
+                stream, on_chunk, response_format, resolved, tools,
             )
 
         # Normal call (no guardrails)
         return self._chat_direct(
             model_id, system, messages, temperature, max_tokens,
-            stream, on_chunk, response_format, resolved,
+            stream, on_chunk, response_format, resolved, tools,
         )
 
     def _chat_direct(self, model_id, system, messages, temperature,
-                     max_tokens, stream, on_chunk, response_format, resolved):
+                     max_tokens, stream, on_chunk, response_format, resolved,
+                     tools=None):
         """Direct LLM call without guardrails."""
         if not resolved:
             return self._call_openai_compatible(
@@ -262,6 +266,7 @@ class LLMClient:
                 stream=stream,
                 on_chunk=on_chunk,
                 response_format=response_format,
+                tools=tools,
             )
 
         if resolved.is_openai_compatible:
@@ -277,6 +282,7 @@ class LLMClient:
                 stream=stream,
                 on_chunk=on_chunk,
                 response_format=response_format,
+                tools=tools,
             )
         elif resolved.is_anthropic:
             return self._call_anthropic(
@@ -316,7 +322,8 @@ class LLMClient:
         return ""
 
     def _chat_with_guardrails(self, model_id, system, messages, temperature,
-                               max_tokens, stream, on_chunk, response_format, resolved):
+                               max_tokens, stream, on_chunk, response_format, resolved,
+                               tools=None):
         """Call LLM with guardrail retry loop."""
         from orbuz.llm.guardrails import Guardrails
         assert self._guardrails is not None, "guardrails must be enabled"
@@ -327,6 +334,7 @@ class LLMClient:
             resp = self._chat_direct(
                 model_id, system, local_messages, temperature,
                 max_tokens, stream, on_chunk, response_format, resolved,
+                tools=tools,
             )
             if not resp.success:
                 return resp  # pass through errors
@@ -404,7 +412,8 @@ class LLMClient:
                                 extra_headers: dict | None = None,
                                 stream: bool = False,
                                 on_chunk: Callable[[str], None] | None = None,
-                                response_format: dict | None = None) -> LLMResponse:
+                                response_format: dict | None = None,
+                                tools: list[dict] | None = None) -> LLMResponse:
         """Call an OpenAI-compatible /v1/chat/completions API via httpx."""
         base = api_base or "https://api.deepseek.com/v1"
         key = api_key or self._first_available_key()
@@ -424,6 +433,8 @@ class LLMClient:
         }
         if response_format:
             body["response_format"] = response_format
+        if tools:
+            body["tools"] = tools
 
         headers = {
             "Content-Type": "application/json",
@@ -459,7 +470,10 @@ class LLMClient:
 
         duration = time.time() - start
         choice = data.get("choices", [{}])[0]
-        content = choice.get("message", {}).get("content", "") or ""
+        message = choice.get("message", {})
+        content = message.get("content", "") or ""
+        tool_calls = message.get("tool_calls")
+        finish_reason = choice.get("finish_reason")
         usage = data.get("usage", {})
         in_t = usage.get("prompt_tokens", 0)
         out_t = usage.get("completion_tokens", 0)
@@ -471,6 +485,8 @@ class LLMClient:
             duration_s=duration,
             success=True,
             cost_usd=_estimate_cost(model, in_t, out_t),
+            tool_calls=tool_calls,
+            finish_reason=finish_reason,
         )
 
     def _stream_openai_compatible(self, url: str, body: dict,

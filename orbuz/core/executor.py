@@ -23,6 +23,7 @@ from orbuz.llm.client import LLMClient
 from orbuz.schema.agent import load_agent, ModelHint
 from orbuz.schema.finding import FindingSet, Finding, Severity, AutofixClass
 from orbuz.core.plugin import get_registry
+from orbuz.codegen.tools import TOOL_SCHEMAS
 
 
 _plugins = get_registry()
@@ -555,22 +556,18 @@ class Executor:
 
             combined_context = (project_ctx + "\n" + (prev_output or '')).strip()
 
-            result = self.dispatcher.run_agent(
+            result = self.dispatcher.run_agent_with_tools(
                 defn, agent_cfg["goal"],
                 context=combined_context,
                 tier=tier,
+                tools=TOOL_SCHEMAS if stage.get("project_dir") else None,
+                project_path=str(project_path) if stage.get("project_dir") else None,
             )
             self._cost_tracker.record_result(agent_cfg["role"], result)
             if not result.success:
                 result = self.dispatcher.handle_failure(defn, agent_cfg["goal"],
                                                          prev_output, result, tier)
             self.ws.write_output(run_id, stage_id, agent_cfg["role"], result.output)
-
-            # Execute any ---actions--- blocks from agent output (e.g. compiler fixes)
-            actions = self._exec_actions(result.output, project_path)
-            if actions:
-                yield {"type": "progress", "stage": stage_id,
-                       "msg": f"  -> executed {len(actions)} fix actions from {agent_cfg['role']}"}
 
             yield {"type": "progress", "stage": stage_id, "agent": agent_cfg["role"]}
 
@@ -758,20 +755,17 @@ class Executor:
                             project_ctx += "## Project Files\n" + "\n".join(flist) + "\n"
                     except Exception:
                         pass
-                    result = self.dispatcher.run_agent(
+                    result = self.dispatcher.run_agent_with_tools(
                         defn, agent_cfg['goal'],
                         context=project_ctx.strip(),
                         tier=tier,
+                        tools=TOOL_SCHEMAS,
+                        project_path=str(project_path),
                     )
                     self._cost_tracker.record_result(role, result)
-                    # Use unique suffix for fanout agents with same role
                     suffix = self._fanout_suffix.get(role, 0) + 1
                     self._fanout_suffix[role] = suffix
                     self.ws.write_output(run_id, stage_id, f"{role}_r{suffix}", result.output)
-                    actions = self._exec_actions(result.output, project_path)
-                    if actions:
-                        yield {'type': 'progress', 'stage': stage_id,
-                               'msg': f'  -> executed {len(actions)} actions from {role}'}
             yield {'type': 'progress', 'stage': stage_id,
                    'msg': f'  done: {sum(1 for r in all_results if r.get("exit_code",0)==0 or "path" in r)}/{len(all_results)} actions OK'}
         else:
@@ -821,152 +815,18 @@ class Executor:
 
                 compiler_context = (project_context + "\n" + (prev_output or '')).strip()
 
-                result = self.dispatcher.run_agent(
+                result = self.dispatcher.run_agent_with_tools(
                     defn, agent_cfg['goal'],
                     context=compiler_context,
                     tier=tier,
+                    tools=TOOL_SCHEMAS,
+                    project_path=str(project_path),
                 )
                 self._cost_tracker.record_result(role, result)
                 self.ws.write_output(run_id, stage_id, role, result.output)
-
-                actions = self._exec_actions(result.output, project_path)
-                if actions:
-                    yield {'type': 'progress', 'stage': stage_id,
-                           'msg': f'  -> executed {len(actions)} actions from {role}'}
-
                 prev_output = result.output
 
         yield {'type': 'progress', 'stage': stage_id, 'msg': 'codegen complete'}
-
-    @staticmethod
-    def _exec_actions(agent_output: str, project_path: Path) -> list[dict]:
-        """Parse and execute actions blocks from agent output.
-
-        Supports multiple formats:
-          ---actions---
-          - write_file: src/main.rs      # list format
-            content: |
-              code...
-          ---
-
-          ---actions---
-          write_file:                     # dict format
-            path: src/main.rs
-            content: |
-              code...
-
-          ---actions---
-          [write_file]                    # bracket format
-          path: src/main.rs
-          content: |
-            code...
-          ---
-
-        Also works without closing --- (parses to end of content).
-        """
-        import re as _re
-        import subprocess as _sp
-        import shutil as _sh
-
-        results = []
-
-        # Find all ---actions--- blocks (with or without closing ---)
-        blocks = _re.split(r'^---actions---\s*$', agent_output, flags=_re.MULTILINE)[1:]
-
-        for block in blocks:
-            # Strip trailing --- and whitespace
-            block = _re.sub(r'^---\s*$.*', '', block, flags=_re.DOTALL).strip()
-            # Split into individual action items
-            items = _re.split(r'\n(?=(?:- |\[|(?:write_file|run|append_file|delete|rename)\b))', block)
-
-            for item in items:
-                item = item.strip()
-                if not item or item.startswith('#'):
-                    continue
-
-                lines = item.split('\n')
-                first = lines[0].strip()
-
-                # Detect action type from various formats
-                action_type = ''
-                path_value = ''
-                content = ''
-                command = ''
-
-                # Format 1: - write_file: path
-                m = _re.match(r'^-\s*(\w+)\s*:\s*(.+)$', first)
-                if m:
-                    action_type = m.group(1)
-                    path_value = m.group(2).strip()
-                    content, command = _parse_action_lines(lines[1:])
-
-                # Format 2: write_file: (dict, path on next line)
-                m = _re.match(r'^(\w+)\s*:\s*$', first)
-                if m:
-                    action_type = m.group(1)
-                    fields, content_lines = _parse_fields_and_content(lines[1:])
-                    path_value = fields.get('path', fields.get('file_path', ''))
-                    command = fields.get('command', '')
-                    content = '\n'.join(content_lines)
-
-                # Format 3: [write_file]
-                m = _re.match(r'^\[(\w+)\]$', first)
-                if m:
-                    action_type = m.group(1)
-                    fields, content_lines = _parse_fields_and_content(lines[1:])
-                    path_value = fields.get('path', fields.get('file_path', ''))
-                    command = fields.get('command', '')
-                    content = '\n'.join(content_lines)
-
-                if not action_type:
-                    continue
-
-                try:
-                    if action_type in ('write_file', 'append_file'):
-                        if not path_value:
-                            continue
-                        fp = project_path / path_value
-                        fp.parent.mkdir(parents=True, exist_ok=True)
-                        content = _trim_content(content)
-                        if action_type == 'write_file':
-                            fp.write_text(content)
-                        else:
-                            with open(fp, 'a') as f:
-                                f.write(content)
-                        results.append({'type': action_type, 'path': str(fp)})
-
-                    elif action_type == 'run':
-                        cmd = command or path_value
-                        if not cmd:
-                            continue
-                        sp = _sp.run(
-                            cmd, shell=True, capture_output=True, text=True,
-                            cwd=str(project_path), timeout=120,
-                        )
-                        results.append({
-                            'type': 'run', 'command': cmd,
-                            'stdout': sp.stdout[-500:], 'stderr': sp.stderr[-500:],
-                            'exit_code': sp.returncode,
-                        })
-
-                    elif action_type in ('delete', 'rename'):
-                        target = project_path / path_value
-                        if target.exists():
-                            if action_type == 'delete':
-                                if target.is_file():
-                                    target.unlink()
-                                elif target.is_dir():
-                                    _sh.rmtree(target)
-                                results.append({'type': 'delete', 'path': path_value})
-                            elif action_type == 'rename':
-                                to_path = item  # simplified
-                                results.append({'type': 'rename', 'from': path_value})
-
-                except Exception as e:
-                    results.append({'type': 'error', 'action': action_type, 'error': str(e)})
-
-        return results
-
 
     @staticmethod
     def _exec_manifest_actions(actions: list[dict], project_path: Path) -> list[dict]:
@@ -1033,66 +893,3 @@ class Executor:
                 results.append({'type': 'error', 'action': action_type, 'error': str(e)})
 
         return results
-
-
-def _trim_content(content: str) -> str:
-    """Trim trailing empty lines and dedent content."""
-    _nl = chr(92) + chr(110)
-    lines = content.split(_nl)
-    while lines and not lines[-1].strip():
-        lines.pop()
-    # Dedent: find common leading whitespace
-    non_empty = [l for l in lines if l.strip()]
-    if non_empty:
-        indent = min(len(l) - len(l.lstrip()) for l in non_empty)
-        if indent:
-            lines = [l[indent:] if l.strip() else l for l in lines]
-    return _nl.join(lines)
-
-
-
-
-def _parse_fields_and_content(lines: list[str]) -> tuple[dict, list[str]]:
-    """Parse indented key: value pairs and content blocks from action lines.
-    Returns (fields_dict, content_lines).
-    """
-    fields = {}
-    content_lines = []
-    in_content = False
-    for line in lines:
-        stripped = line.rstrip()
-        if in_content:
-            content_lines.append(line)
-            continue
-        # Detect content start: line ending with |
-        if stripped.endswith('|') and ':' in stripped:
-            in_content = True
-            continue
-        if ':' in stripped:
-            k, v = stripped.split(':', 1)
-            fields[k.strip()] = v.strip()
-    return fields, content_lines
-
-
-def _parse_action_lines(lines: list[str]) -> tuple[str, str]:
-    """Parse content: | block and command: field from action lines.
-    Returns (content_str, command_str).
-    """
-    content_lines = []
-    command = ''
-    in_content = False
-    for line in lines:
-        stripped = line.rstrip()
-        if in_content:
-            content_lines.append(line)
-            continue
-        if stripped.endswith('|') or stripped.endswith('|+') or stripped.endswith('|-'):
-            in_content = True
-            continue
-        if stripped.startswith('command:'):
-            command = stripped.split(':', 1)[1].strip()
-        elif ':' in stripped:
-            k, v = stripped.split(':', 1)
-            if k.strip() == 'command':
-                command = v.strip()
-    return '\n'.join(content_lines), command
