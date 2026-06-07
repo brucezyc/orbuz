@@ -189,6 +189,11 @@ agents:
     tags: [debugging, bug-fix, troubleshooting]
     file: debugger.yaml
 
+  - name: setup
+    summary: "System setup: install packages, run pip/apt/cargo, configure environment via terminal"
+    tags: [setup, install, pip, dependencies, configuration]
+    file: setup.yaml
+
   - name: documentation-writer
     summary: "Technical documentation: extract structure from code/API → write clear docs → include examples and usage instructions"
     tags: [documentation, writing, technical]
