@@ -18,5 +18,6 @@ output:
     - "## Files (ordered by dependency)"
     - "## Types / Interfaces (cross-file)"
     - "## Dependencies"
+  notes: "Writers will output their files as ---actions--- blocks, not raw code"
 mode:
   execution: subagent

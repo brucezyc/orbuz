@@ -136,11 +136,16 @@ class Orchestrator:
             '  ]\n'
             '}\n'
             '```\n\n'
-            "Available patterns: fanout (parallel), pipeline (sequential), producer_reviewer (produce->review cycle)\n"
-            "Available model tiers: cheap (information gathering), balanced (default), quality (analysis/synthesis)\n"
+            "Available patterns:\n"
+            "  - fanout (parallel research agents, optionally merged)\n"
+            "  - pipeline (sequential agents, output feeds next)\n"
+            "  - producer_reviewer (produce -> review -> cycle)\n"
+            "  - codegen (sequential codegen agents, executes ---actions--- blocks: write_file, run, append, delete, rename)\n"
+            "Available model tiers: cheap (info gathering), balanced (default drafting), quality (analysis/synthesis)\n"
             "Select the best-matching agent name from the library for the `role` field.\n"
             "If no exact match exists, use the closest one available.\n"
-            "NOTE: For code generation / compilation / testing tasks, prefer agents tagged with 'codegen' - they have filesystem tools and can read/write files.\n"
+            "For codegen stages, set `project_dir` to the target directory and use codegen-tagged agents.\n"
+            "NOTE: For code generation / compilation / testing tasks, prefer agents tagged with 'codegen'.\n"
             "Output only JSON, no explanation."
         )
 

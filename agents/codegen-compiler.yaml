@@ -20,7 +20,15 @@ output:
   structure:
     - "Current compile status (pass/fail)"
     - "Fix description (what was wrong and how it was fixed)"
-    - "Updated file contents if fixed"
+  actions:
+    enabled: true
+    format: |
+      ---actions---
+      - write_file: path/to/file.rs
+        content: |
+          <fixed file content>
+      - run: cargo check
+      ---
 mode:
   execution: subagent
 model_hint:

@@ -21,6 +21,14 @@ output:
   format: code
   structure:
     - "File content ready to write to disk"
+  actions:
+    enabled: true
+    format: |
+      ---actions---
+      - write_file: path/to/file.rs
+        content: |
+          <file content here>
+      ---
 mode:
   execution: subagent
 model_hint:
