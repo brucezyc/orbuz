@@ -161,6 +161,10 @@ def main():
                          help="LLM API key")
     codegen.add_argument("--quality-model", default=None,
                          help="Model for generation tasks (default: $DEEPSEEK_MODEL or deepseek/deepseek-v4-flash)")
+    codegen.add_argument("--balanced-model", default=None,
+                         help="Balanced model ID for code generation")
+    codegen.add_argument("--cheap-model", default=None,
+                         help="Cheap model ID for code generation")
     codegen.add_argument("--tier", default="balanced", choices=["cheap", "balanced", "quality"],
                          help="Model tier for code generation")
 
@@ -435,20 +439,66 @@ def _cmd_codegen(args):
                         print(f"    {f} affects {len(result.directly_affected)} files")
 
     # ── 4. LLM Generation ──
-    # (This is where orbuz dispatcher would call LLM to generate code)
-    # For now, print the prompts that would be used
-    if spec_plan and spec_plan.per_file_prompts and not args.no_llm:
-        print(f"\n  Code generation prompts ready for {len(spec_plan.per_file_prompts)} files")
-        if args.goal:
-            print(f"  Goal: {args.goal}")
-        if args.api_key:
-            print(f"  Using model tier: {args.tier}")
 
-    elif args.goal and not args.no_llm:
-        print(f"\n  Goal: {args.goal}")
-        if args.api_key:
-            print(f"  Model tier: {args.tier}")
-        print(f"  (Spec mode: pass --spec <yaml> for multi-file generation)")
+    generated_files: list[str] = []
+
+    if args.no_llm:
+        print("  Skipping LLM generation (--no-llm)")
+    else:
+        # Create LLM client (reuse env keys from Hermes/DeepSeek)
+        from orbuz.llm.client import LLMClient
+
+        codegen_models = {
+            "quality": args.quality_model,
+            "balanced": args.balanced_model,
+            "cheap": args.cheap_model,
+        }
+        # Remove explicit api_key so LLMClient auto-detects env vars
+        llm = LLMClient(models=codegen_models, api_key=args.api_key, mock=False)
+        if llm.mock:
+            print("  ⚠️ No API key found — using mock mode (placeholder text)")
+
+        if spec_plan and spec_plan.per_file_prompts:
+            total = len(spec_plan.per_file_prompts)
+            print(f"\n  Generating {total} file(s)...")
+            for i, (file_path, prompt) in enumerate(spec_plan.per_file_prompts.items(), 1):
+                print(f"    [{i}/{total}] {file_path} ...", end=" ", flush=True)
+                resp = llm.chat(
+                    model_tier=args.tier,
+                    system=(
+                        "You are an expert Rust code generator. "
+                        "Output ONLY the file content. No markdown fences, no explanations."
+                    ),
+                    messages=[{"role": "user", "content": prompt}],
+                    temperature=0.3,
+                    max_tokens=8192,
+                )
+                if resp.success:
+                    code = resp.content.strip()
+                    # Strip markdown fences if present
+                    if code.startswith("```"):
+                        first_nl = code.find("\n")
+                        if first_nl != -1:
+                            code = code[first_nl + 1 :]
+                        if code.endswith("```"):
+                            code = code[:-3]
+                        elif code.rstrip().endswith("```"):
+                            code = code.rstrip()[:-3]
+                    code = code.strip()
+
+                    full_path = proj_root / file_path
+                    full_path.parent.mkdir(parents=True, exist_ok=True)
+                    full_path.write_text(code, encoding="utf-8")
+                    generated_files.append(file_path)
+                    tok = resp.input_tokens + resp.output_tokens
+                    print(f"✅ ({tok:,} tokens, ${resp.cost_usd:.4f})")
+                else:
+                    print(f"❌ {resp.error}")
+
+            print(f"  ✅ {len(generated_files)}/{total} files written")
+
+        elif args.goal:
+            print(f"\n  Goal: {args.goal}  (pass --spec <yaml> for multi-file generation)")
 
     # ── 5. Compile feedback loop ──
 
@@ -457,14 +507,11 @@ def _cmd_codegen(args):
         print(f"    Command: {args.compile_command}")
         print(f"    Max attempts: {args.compile_max_attempts}")
 
-        # Quick syntax check — even without generating code, this validates
-        # the current state of the project
-        print(f"    Running initial check...")
         from orbuz.codegen.feedback_loop import FeedbackLoop
         loop = FeedbackLoop(
             command=args.compile_command,
             cwd=proj_dir,
-            max_attempts=1,  # just check, don't fix (no LLM loop here)
+            max_attempts=args.compile_max_attempts,
             language=lang,
         )
         result = loop.run()
@@ -473,12 +520,67 @@ def _cmd_codegen(args):
         else:
             print(f"    ❌ Compile check failed — {len(result.errors)} error(s)")
             if result.error_summary:
-                # Show first error succinctly
                 lines = result.error_summary.splitlines()
                 for line in lines[:5]:
                     print(f"      {line}")
                 if len(lines) > 5:
                     print(f"      ... ({len(lines) - 5} more lines)")
+
+            # Auto-fix with LLM if we generated code
+            if generated_files and not getattr(llm, 'mock', False):
+                print(f"  Auto-fixing with LLM (up to {args.compile_max_attempts - 1} retries)...")
+                from orbuz.codegen.feedback_loop import format_errors_for_llm
+
+                for attempt in range(2, args.compile_max_attempts + 1):
+                    # Collect error info
+                    error_fmt = format_errors_for_llm(result.errors, result.output)
+
+                    # Build fix prompt — include current file contents
+                    fix_prompt = f"以下 Rust 项目编译失败。请修复错误。\n\n{error_fmt}\n\n"
+                    for fp in generated_files:
+                        full_path = proj_root / fp
+                        if full_path.exists():
+                            fix_prompt += f"\n### {fp}\n```rust\n{full_path.read_text(encoding='utf-8')}\n```\n"
+
+                    fix_prompt += (
+                        "\n输出格式：对于每个需要修复的文件，用 `@@ file:path/to/file.rs @@` 开头，"
+                        "然后输出该文件的完整新内容。"
+                    )
+
+                    fix_resp = llm.chat(
+                        model_tier=args.tier,
+                        system="You fix Rust compile errors. Output file contents prefixed with @@ file:path @@ markers.",
+                        messages=[{"role": "user", "content": fix_prompt}],
+                        temperature=0.2,
+                        max_tokens=16384,
+                    )
+
+                    if fix_resp.success:
+                        # Parse @@ file:path @@ sections and write
+                        import re as _re
+                        section_re = _re.compile(r'@@\s*file:\s*(\S+)\s*@@\s*\n?(.*?)(?=@@\s*file:|@@\s*end|$)', re.DOTALL)
+                        for m in section_re.finditer(fix_resp.content):
+                            fp = m.group(1).strip()
+                            content = m.group(2).strip()
+                            if content:
+                                full_path = proj_root / fp
+                                full_path.parent.mkdir(parents=True, exist_ok=True)
+                                full_path.write_text(content, encoding="utf-8")
+                                print(f"    🔧 Updated {fp}")
+                            else:
+                                # Fallback: whole output is the file
+                                full_path = proj_root / generated_files[0]
+                                full_path.write_text(fix_resp.content.strip(), encoding="utf-8")
+                                print(f"    🔧 Updated {generated_files[0]} (fallback)")
+
+                    result = loop.run()
+                    if result.success:
+                        print(f"    ✅ Compile passed after {attempt} attempt(s)")
+                        break
+                    else:
+                        print(f"    ❌ Still {len(result.errors)} error(s) after attempt {attempt}")
+                else:
+                    print(f"    ❌ Compile fix exhausted ({args.compile_max_attempts} attempts)")
 
     # ── 6. Oracle validation ──
 
