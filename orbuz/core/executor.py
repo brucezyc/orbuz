@@ -615,3 +615,200 @@ class Executor:
             self.ws.set_continuation(run_id, decision.get("note", ""))
         elif action == "rerun":
             pass  # Simplified
+
+    
+
+    
+    # ── Codegen pattern with YAML actions execution ──
+
+    def _exec_codegen(self, run_id, stage, idx):
+        """Codegen pattern: dispatch agents sequentially, execute actions from output.
+
+        Each agent can output YAML actions blocks:
+            ---actions---
+            - write_file: path/to/file.rs
+              content: |
+                fn main() {}
+            - run: cargo check
+            ---
+        """
+        stage_id = stage['id']
+        agents_cfg = stage.get('agents', [])
+        project_dir = stage.get('project_dir', '.')
+        project_path = Path(project_dir).resolve()
+
+        yield {'type': 'progress', 'stage': stage_id,
+               'msg': f'Starting codegen ({len(agents_cfg)} agents)'}
+
+        prev_output = ''
+        for i, agent_cfg in enumerate(agents_cfg):
+            role = agent_cfg['role']
+            defn = load_agent(role)
+            tier = agent_cfg.get('model_assignment', {}).get('tier', 'balanced')
+
+            yield {'type': 'progress', 'stage': stage_id,
+                   'msg': f'Running {role}... ({i+1}/{len(agents_cfg)})'}
+
+            result = self.dispatcher.run_agent(
+                defn, agent_cfg['goal'],
+                context=prev_output if prev_output else '',
+                tier=tier,
+            )
+            self._cost_tracker.record_result(role, result)
+            self.ws.write_output(run_id, stage_id, role, result.output)
+
+            actions = self._exec_actions(result.output, project_path)
+            if actions:
+                yield {'type': 'progress', 'stage': stage_id,
+                       'msg': f'  -> executed {len(actions)} actions from {role}'}
+
+            prev_output = result.output
+
+        yield {'type': 'progress', 'stage': stage_id, 'msg': 'codegen complete'}
+
+    @staticmethod
+    def _exec_actions(agent_output: str, project_path: Path) -> list[dict]:
+        """Parse and execute YAML actions blocks from agent output.
+
+        Format (YAML-like, parsed without pyyaml):
+            ---actions---
+            - write_file: path/to/file.rs
+              content: |
+                file content lines...
+            - run: cargo check
+            ---
+
+        Supported actions: write_file, run, append_file, delete, rename.
+        Returns list of {type, path|command, ...} results.
+        """
+        import re as _re
+        import subprocess as _sp
+        import shutil as _sh
+
+        results = []
+        pat_start = r'^---actions---\s*$(.+?)^---\s*$'
+        block_re = _re.compile(pat_start, _re.MULTILINE | _re.DOTALL)
+
+        for match in block_re.finditer(agent_output):
+            body = match.group(1).strip()
+            raw_actions = _re.split(r'\n(?=\s*- )', body)
+            for raw in raw_actions:
+                raw = raw.strip()
+                if not raw or raw.startswith('#'):
+                    continue
+                raw = _re.sub(r'^\s*-\s*', '', raw, count=1)
+                lines = raw.split('\n')
+                if not lines:
+                    continue
+                first = lines[0].strip()
+                if ':' not in first:
+                    continue
+                action_type, value = first.split(':', 1)
+                action_type = action_type.strip()
+                value = value.strip()
+                if not action_type:
+                    continue
+
+                fields = {}
+                content_lines = []
+                in_content = False
+                content_indent = None
+                for line in lines[1:]:
+                    if in_content:
+                        stripped = line.rstrip()
+                        if stripped and content_indent is not None:
+                            indent = len(line) - len(line.lstrip())
+                            if indent < content_indent and not line.strip().startswith('#'):
+                                if stripped:
+                                    if ':' in stripped and indent < 4:
+                                        k, v = stripped.split(':', 1)
+                                        fields[k.strip()] = v.strip()
+                                        in_content = False
+                                        content_indent = None
+                                        continue
+                            content_lines.append(line)
+                        elif stripped:
+                            content_lines.append(line)
+                        else:
+                            content_lines.append('')
+                        continue
+                    stripped = line.rstrip()
+                    if stripped.endswith('|') and ':' in stripped:
+                        in_content = True
+                        content_lines = []
+                        content_indent = None
+                    elif ':' in stripped:
+                        k, v = stripped.split(':', 1)
+                        fields[k.strip()] = v.strip()
+
+                try:
+                    if action_type == 'write_file':
+                        file_path = project_path / value
+                        content = '\n'.join(content_lines)
+                        content = _trim_content(content)
+                        file_path.parent.mkdir(parents=True, exist_ok=True)
+                        file_path.write_text(content)
+                        results.append({'type': 'write_file', 'path': str(file_path)})
+
+                    elif action_type == 'append_file':
+                        file_path = project_path / value
+                        content = '\n'.join(content_lines)
+                        content = _trim_content(content)
+                        file_path.parent.mkdir(parents=True, exist_ok=True)
+                        with open(file_path, 'a') as f:
+                            f.write(content)
+                        results.append({'type': 'append_file', 'path': str(file_path)})
+
+                    elif action_type == 'run':
+                        cmd = value or fields.get('command', '')
+                        if not cmd:
+                            continue
+                        sp = _sp.run(
+                            cmd, shell=True, capture_output=True, text=True,
+                            cwd=str(project_path), timeout=120,
+                        )
+                        out = sp.stdout[-500:] if sp.stdout else ''
+                        err = sp.stderr[-500:] if sp.stderr else ''
+                        results.append({
+                            'type': 'run', 'command': cmd,
+                            'stdout': out, 'stderr': err,
+                            'exit_code': sp.returncode,
+                        })
+
+                    elif action_type == 'delete':
+                        target = project_path / value
+                        if target.exists():
+                            if target.is_file():
+                                target.unlink()
+                            elif target.is_dir():
+                                _sh.rmtree(target)
+                            results.append({'type': 'delete', 'path': value})
+
+                    elif action_type == 'rename':
+                        to_path = fields.get('to', '')
+                        if to_path:
+                            src = project_path / value
+                            dst = project_path / to_path
+                            if src.exists():
+                                src.rename(dst)
+                                results.append({'type': 'rename', 'from': value, 'to': to_path})
+
+                except Exception as e:
+                    results.append({'type': 'error', 'action': action_type, 'error': str(e)})
+
+        return results
+
+
+def _trim_content(content: str) -> str:
+    """Trim trailing empty lines and dedent content."""
+    _nl = chr(92) + chr(110)
+    lines = content.split(_nl)
+    while lines and not lines[-1].strip():
+        lines.pop()
+    # Dedent: find common leading whitespace
+    non_empty = [l for l in lines if l.strip()]
+    if non_empty:
+        indent = min(len(l) - len(l.lstrip()) for l in non_empty)
+        if indent:
+            lines = [l[indent:] if l.strip() else l for l in lines]
+    return _nl.join(lines)
