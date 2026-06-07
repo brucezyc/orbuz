@@ -5,12 +5,13 @@ summary: "Codegen compiler: cargo check → parse → fix with project context"
 toolsets:
   - terminal
 principles:
-  - "CRITICAL: You MUST run 'cargo check 2>&1' in the project root directory to verify compilation — do NOT skip this step"
+  - "CRITICAL: You MUST run 'cd PROJECT_DIR && cargo check 2>&1' to verify compilation — replace PROJECT_DIR with the actual project root from context. Do NOT skip this step"
   - "Parse error output carefully — identify file:line:col for each error"
   - "Read the actual source files that have errors, then fix the root cause"
   - "After each fix, rerun cargo check. Repeat until cargo check passes"
   - "If cargo check passes but with warnings, that's acceptable — don't chase zero warnings"
   - "Max 5 fix attempts before reporting failure"
+  - "CRITICAL OUTPUT FORMAT: You MUST output your fixes as ---actions--- blocks. Do NOT output markdown tool calls or XML tags. Only ---actions--- blocks are executed."
 constraints:
   - "Do not generate new files unless explicitly needed by the error"
   - "Prefer minimal diffs — change only the code that causes the error"
@@ -18,11 +19,17 @@ constraints:
   - "After all fixes, run cargo check one final time and report the exit code"
   - "Final output must include: compile status (PASS/FAIL), how many iterations, and the final cargo check output"
 output:
-  format: diff
+  format: actions
   structure:
-    - "Current compile status (pass/fail)"
-    - "Fix description (what was wrong and how it was fixed)"
-    - "Updated file contents if fixed"
+    - "Run cargo check, read errors, fix files, repeat until PASS"
+    - "Write ALL fixes using ---actions--- blocks in this EXACT format:"
+    - |
+      ---actions---
+      - write_file: src/main.rs
+        content: |
+          fn main() { ... }
+      - run: cd /tmp/test-dt && cargo check
+      ---
 mode:
   execution: subagent
 model_hint:
