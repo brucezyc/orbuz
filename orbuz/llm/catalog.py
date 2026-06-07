@@ -14,8 +14,8 @@ from orbuz.llm.provider import ProviderConfig, ModelInfo, EndpointType, KNOWN_PR
 # ── Default model presets ──
 
 DEFAULT_MODELS: dict[str, str] = {
-    "quality": "anthropic/claude-opus-4-8",
-    "balanced": "anthropic/claude-sonnet-4-6",
+    "quality": "deepseek/deepseek-v4-pro",
+    "balanced": "deepseek/deepseek-v4-flash",
     "cheap": "deepseek/deepseek-v4-flash",
 }
 

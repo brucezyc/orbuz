@@ -123,6 +123,9 @@ def _summarize(ctx: dict) -> str:
     n_traits = len(ctx.get("traits", []))
     if n_traits:
         parts.append(f"接口/Trait: {n_traits}")
+    n_impls = len(ctx.get("impls", []))
+    if n_impls:
+        parts.append(f"Impl块: {n_impls}")
     deps = ctx.get("deps", [])
     if deps:
         parts.append(f"依赖: {len(deps)}")
@@ -261,6 +264,7 @@ def _scan_rust(root: Path) -> dict:
         "types": [],
         "traits": [],
         "fns": [],
+        "impls": [],
         "deps": [],
     }
 
@@ -295,7 +299,8 @@ def _scan_rust(root: Path) -> dict:
         content = rs_file.read_text(encoding="utf-8", errors="replace")
         result["types"].extend(_extract_types(content, rel))
         result["traits"].extend(_extract_traits(content, rel))
-        result["fns"].extend(_extract_pub_fns(content, rel))
+        result["fns"].extend(_extract_fn_sigs(content, rel))
+        result["impls"].extend(_extract_impls(content, rel))
 
     return result
 
@@ -366,6 +371,11 @@ _RE_STRUCT = re.compile(r'^\s*(?:pub\s+)?(?:struct|enum|union)\s+(\w+)')
 _RE_TRAIT = re.compile(r'^\s*(?:pub\s+)?((?:unsafe\s+)?trait)\s+(\w+)')
 _RE_PUB_FN = re.compile(r'^\s*pub\s+(?:unsafe\s+)?fn\s+(\w+)')
 _RE_IMPL = re.compile(r'^\s*impl(\s*<[^>]+>)?\s+(\w+)')
+# 完整函数签名（含参数和返回类型，忽略包含 async/unsafe）
+_RE_FN_SIG = re.compile(
+    r'^\s*(?:pub\s+)?(?:unsafe\s+)?(?:async\s+)?fn\s+(\w+)\s*\(([^)]*)\)\s*(->\s*(?:[^{;]+))?',
+    re.MULTILINE,
+)
 
 
 def _extract_types(content: str, rel_path: str) -> list[dict]:
@@ -387,6 +397,42 @@ def _extract_pub_fns(content: str, rel_path: str) -> list[dict]:
     for m in _RE_PUB_FN.finditer(content):
         fns.append({"name": m.group(1), "file": rel_path})
     return fns
+
+
+def _extract_fn_sigs(content: str, rel_path: str) -> list[dict]:
+    """提取完整函数签名（含参数列表和返回类型）。"""
+    fns = []
+    for m in _RE_FN_SIG.finditer(content):
+        name = m.group(1)
+        params = m.group(2).strip()
+        ret = (m.group(3) or "").strip()
+        sig = f"fn {name}({params})"
+        if ret:
+            sig += f" {ret}"
+        fns.append({
+            "name": name,
+            "signature": sig,
+            "file": rel_path,
+        })
+    return fns
+
+
+def _extract_impls(content: str, rel_path: str) -> list[dict]:
+    """提取 impl 块（含 trait 和关联函数名）。"""
+    impls = []
+    for m in _RE_IMPL.finditer(content):
+        type_name = m.group(2)
+        # 找关联函数
+        inner_fns = []
+        for fm in _RE_FN_SIG.finditer(content, m.end()):
+            inner_fns.append(fm.group(1))
+        impls.append({
+            "type": type_name,
+            "has_trait": bool(m.group(1) and " for " in content),
+            "fns": inner_fns[:30],  # 限制数量
+            "file": rel_path,
+        })
+    return impls
 
 
 # ── Python Scanner ──

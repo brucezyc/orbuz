@@ -547,6 +547,29 @@ def _cmd_codegen(args):
 
                     # Build fix prompt — include current file contents
                     fix_prompt = f"以下 Rust 项目编译失败。请修复错误。\n\n{error_fmt}\n\n"
+
+                    # Inject project context if available
+                    if project_ctx and "types" in project_ctx:
+                        ctx_parts = []
+                        types = project_ctx.get("types", [])
+                        if types:
+                            ctx_parts.append("项目类型/结构体:")
+                            for t in types[:20]:
+                                ctx_parts.append(f"  - {t.get('kind', 'type')} {t['name']} ({t['file']})")
+                        fns = project_ctx.get("fns", [])
+                        if fns:
+                            ctx_parts.append("\n函数签名:")
+                            for f in fns[:30]:
+                                sig = f.get("signature", f.get("name", "?"))
+                                ctx_parts.append(f"  - {sig} ({f['file']})")
+                        impls = project_ctx.get("impls", [])
+                        if impls:
+                            ctx_parts.append("\nImpl块:")
+                            for imp in impls[:15]:
+                                ctx_parts.append(f"  - impl {imp['type']} ({imp['file']}) → {len(imp['fns'])} fn(s)")
+                        if len(ctx_parts) > 1:
+                            fix_prompt += "\n### 项目上下文\n" + "\n".join(ctx_parts) + "\n"
+
                     for fp in generated_files:
                         full_path = proj_root / fp
                         if full_path.exists():

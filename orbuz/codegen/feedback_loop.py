@@ -56,24 +56,43 @@ class FeedbackResult:
 def parse_errors_rust(output: str) -> list[CompileError]:
     """解析 cargo check / cargo build 的错误输出。"""
     errors = []
-    # Rust 错误格式: error[E0308]: mismatched types
-    #   --> src/main.rs:42:18
     current: CompileError | None = None
     error_re = re.compile(
-        r'^\s*(error|warning|note)\[?([^\]]*)\]?:\s*(.*)',
+        r'^\s*(error|warning|note)\[?([^\]]*)\\]?:?\s*(.*)',
         re.MULTILINE,
     )
     loc_re = re.compile(r'\s*-->\s*([^:]+):(\d+):(\d+)')
+    # Inline format: error[E0308]: src/main.rs:42:18: mismatched types
+    inline_re = re.compile(
+        r'^\s*(?:error|warning)\[?([^\]]*)\]?:\s+(\S+):(\d+):(\d+):\s*(.*)',
+    )
 
     lines = output.splitlines()
     for i, line in enumerate(lines):
+        # Try inline file:line:col first (common in newer cargo fmt)
+        inl_m = inline_re.match(line)
+        if inl_m:
+            if current and current.message and current.file:
+                errors.append(current)
+            current = CompileError(
+                file=inl_m.group(2),
+                line=int(inl_m.group(3)),
+                col=int(inl_m.group(4)),
+                level="error",
+                message=inl_m.group(5).strip(),
+                code=inl_m.group(1) or None,
+            )
+            # Append immediately since we have full info
+            errors.append(current)
+            current = None
+            continue
+
         # Try location first
         loc_m = loc_re.match(line)
         if loc_m and current:
             current.file = loc_m.group(1)
             current.line = int(loc_m.group(2))
             current.col = int(loc_m.group(3))
-            # Grab next lines as code context
             code_lines = []
             for j in range(i + 1, min(i + 5, len(lines))):
                 if lines[j].strip() and not lines[j].startswith("  = ") and not lines[j].startswith("  note"):
@@ -81,7 +100,6 @@ def parse_errors_rust(output: str) -> list[CompileError]:
                 else:
                     break
             current.code = "\n".join(code_lines[-3:]) if code_lines else ""
-            # Clear current so we don't reuse it for the next error
             if current.message and current.file:
                 errors.append(current)
             current = None
@@ -89,10 +107,8 @@ def parse_errors_rust(output: str) -> list[CompileError]:
 
         err_m = error_re.match(line)
         if err_m:
-            # If we had an incomplete previous error, save it
             if current and current.message and current.file:
                 errors.append(current)
-
             level = err_m.group(1)
             code = err_m.group(2) or None
             msg = err_m.group(3)
@@ -103,7 +119,6 @@ def parse_errors_rust(output: str) -> list[CompileError]:
             continue
 
         if current and not current.file:
-            # Try inline location: file:line:col
             inline = re.match(
                 r'^\s*(\S+):(\d+):(\d+):\s*(error|warning)\[?([^\]]*)\]?:\s*(.*)',
                 line,
@@ -115,10 +130,69 @@ def parse_errors_rust(output: str) -> list[CompileError]:
                 current.level = inline.group(4)
                 current.message = inline.group(6)
 
-    # Save last error
     if current and current.message and current.file:
         errors.append(current)
 
+    return errors
+
+
+def parse_errors_rust_v2(output: str) -> list[CompileError]:
+    """
+    更鲁棒的 Rust 错误解析器（v2）。
+    
+    处理现代 Rustc 输出的各种模式:
+      - `error[E0308]: src/main.rs:42:18: msg` (inline)
+      - `error[E0308]: msg` → `  --> file:line:col` (classic 2-line)
+      - `error: file:line:col: msg` (no error code)
+      - `  |` multi-line labels
+      - `  = help:` messages
+    """
+    errors = []
+    seen_locs = set()  # dedup: file:line:col:message
+    
+    # Pattern 1: inline with file:line:col right after error code
+    for m in re.finditer(
+        r'^\s*(?:error|warning)\[?([^\]]*)\]?:\s+(\S+):(\d+):(\d+):\s*(.*)',
+        output, re.MULTILINE,
+    ):
+        key = (m.group(2), int(m.group(3)), int(m.group(4)), m.group(5).strip())
+        if key not in seen_locs:
+            seen_locs.add(key)
+            errors.append(CompileError(
+                file=m.group(2), line=int(m.group(3)),
+                col=int(m.group(4)), level="error",
+                message=m.group(5).strip(),
+                code=m.group(1) or None,
+            ))
+    
+    # Pattern 2: classic 2-line (handled by parse_errors_rust, but let's use more permissive regex here)
+    err_locs = list(re.finditer(
+        r'^\s*(?:error|warning)\[?([^\]]*)\]?:\s*(.*)\n'
+        r'\s*-->\s*(\S+):(\d+):(\d+)',
+        output, re.MULTILINE,
+    ))
+    for m in err_locs:
+        key = (m.group(3), int(m.group(4)), int(m.group(5)), m.group(2).strip())
+        if key not in seen_locs:
+            seen_locs.add(key)
+            errors.append(CompileError(
+                file=m.group(3), line=int(m.group(4)),
+                col=int(m.group(5)), level="error",
+                message=m.group(2).strip(),
+                code=m.group(1) or None,
+            ))
+    
+    return errors
+
+
+def parse_errors_rust_chain(output: str) -> list[CompileError]:
+    """
+    链式 Rust 错误解析器：先用 v1（首选的严格解析），
+    如果没解析到任何错误，用 v2（宽松的兜底解析）。
+    """
+    errors = parse_errors_rust(output)
+    if not errors:
+        errors = parse_errors_rust_v2(output)
     return errors
 
 
@@ -185,7 +259,7 @@ def parse_errors_generic(output: str) -> list[CompileError]:
 # ── 注册表 ──
 
 _ERROR_PARSERS = {
-    "rust": parse_errors_rust,
+    "rust": parse_errors_rust_chain,
     "python": parse_errors_python,
     # cpp 和通用都用 generic
     "cpp": parse_errors_generic,
