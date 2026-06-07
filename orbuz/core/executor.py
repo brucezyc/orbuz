@@ -764,17 +764,26 @@ class Executor:
             return
         try:
             import urllib.request
-            payload = json.dumps({
+            import os
+            import hmac
+            import hashlib
+            raw_payload = json.dumps({
                 "run_id": run_id,
                 "stage_id": stage_id,
                 "stage_name": stage_name,
                 "status": status,
                 "summary": summary or {},
-            }).encode()
+            })
+            payload = raw_payload.encode()
+            headers = {"Content-Type": "application/json"}
+            secret = os.environ.get("ORBUZ_WEBHOOK_SECRET", "")
+            if secret:
+                sig = hmac.new(secret.encode(), payload, hashlib.sha256).hexdigest()
+                headers["X-Hub-Signature-256"] = f"sha256={sig}"
             req = urllib.request.Request(
                 self.webhook_url,
                 data=payload,
-                headers={"Content-Type": "application/json"},
+                headers=headers,
                 method="POST",
             )
             urllib.request.urlopen(req, timeout=10)
