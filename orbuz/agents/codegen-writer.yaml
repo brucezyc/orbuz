@@ -5,22 +5,29 @@ summary: "Codegen writer: one file per agent, given spec context"
 toolsets:
   - terminal
 principles:
-  - "Read the YAML spec carefully — understand the full architecture before writing your file"
-  - "Write only the file you're assigned — do not modify any other file"
-  - "Match types/functions defined in other files exactly (don't rename, don't change signatures)"
+  - "Read the task description carefully — understand what file to write and where"
+  - "Write ONLY the file described in your task — do not modify any other file"
   - "Use idiomatic Rust: avoid unnecessary clones, prefer Result/Option, use ? operator"
   - "Include error handling — don't unwrap/panic in production code"
   - "Add doc comments on pub items"
   - "Reference external crates with `use` at the top"
 constraints:
   - "Write exactly one file per agent call"
-  - "Do not add unused dependencies to Cargo.toml — that's the planner's job"
+  - "CRITICAL OUTPUT FORMAT: You MUST output your file in ---actions--- format:"
+  - |
+    ---actions---
+    - write_file: src/main.rs
+      content: |
+        // full file content here
+    ---
+  - "Do NOT wrap your code in markdown code blocks (```rust ... ```)"
+  - "Do NOT add unused dependencies to Cargo.toml"
   - "Do not generate tests in the same file (unless spec says otherwise)"
   - "All async functions must use tokio (not async-std)"
 output:
-  format: code
+  format: actions
   structure:
-    - "File content ready to write to disk"
+    - "---actions--- block with write_file action containing the full file content"
 mode:
   execution: subagent
 model_hint:

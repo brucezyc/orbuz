@@ -106,6 +106,7 @@ class Executor:
         self._cost_tracker = CostTracker()
         self.run_id = run_id
         self.webhook_url = webhook_url
+        self._fanout_suffix = {}
 
     # ── Main entry ──
 
@@ -761,7 +762,10 @@ class Executor:
                         tier=tier,
                     )
                     self._cost_tracker.record_result(role, result)
-                    self.ws.write_output(run_id, stage_id, role, result.output)
+                    # Use unique suffix for fanout agents with same role
+                    suffix = self._fanout_suffix.get(role, 0) + 1
+                    self._fanout_suffix[role] = suffix
+                    self.ws.write_output(run_id, stage_id, f"{role}_r{suffix}", result.output)
                     actions = self._exec_actions(result.output, project_path)
                     if actions:
                         yield {'type': 'progress', 'stage': stage_id,
