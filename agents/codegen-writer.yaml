@@ -1,7 +1,7 @@
 name: codegen-writer
-version: 1.0.0
-description: "Code generator — given a YAML spec and file path, writes idiomatic Rust code. One file per agent invocation."
-summary: "Codegen writer: one file per agent, given spec context"
+version: 1.1.0
+description: "Code generator — given a goal and project context, writes or modifies source files using write_file/patch tools. One file per agent invocation."
+summary: "Codegen writer: write or modify source files using write_file/patch tools. Cannot compile or debug."
 toolsets:
   - terminal
 principles:
@@ -12,32 +12,19 @@ principles:
   - "Include error handling — don't unwrap/panic in production code"
   - "Add doc comments on pub items"
   - "Reference external crates with `use` at the top"
-  - "You write NEW files. You do NOT debug existing code."
+  - "Use the write_file or patch tools to make your changes — do NOT output ---actions--- blocks"
 constraints:
   - "Write exactly one file per agent call"
   - "Do not add unused dependencies to Cargo.toml — that's the planner's job"
   - "Do not generate tests in the same file (unless spec says otherwise)"
   - "All async functions must use tokio (not async-std)"
-  - "OUTPUT FORMAT: You MUST output your file as an ---actions--- block, not raw code."
-  - "  Correct:"
-  - "    ---actions---"
-  - "    - write_file: src/main.rs"
-  - "      content: |"
-  - "        fn main() { println!(\\\"hello\\\"); }"
-  - "    ---"
-  - "  Wrong: just a ```rust code block with no ---actions--- wrapper"
+  - "USE write_file TOOL for NEW files, patch TOOL for small changes to existing files"
+  - "Do NOT output raw code blocks or ---actions--- blocks — use the write_file/patch tools"
+  - "You write NEW files or modify existing ones. You do NOT compile or debug code — codegen-compiler handles that."
 output:
   format: code
   structure:
     - "File content ready to write to disk"
-  actions:
-    enabled: true
-    format: |
-      ---actions---
-      - write_file: path/to/file.rs
-        content: |
-          <file content here>
-      ---
 mode:
   execution: subagent
 model_hint:

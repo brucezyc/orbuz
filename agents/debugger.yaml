@@ -1,7 +1,7 @@
 name: debugger
-version: 1.0.0
-description: "Systematically locate and fix bugs"
-summary: "System debugging: analyze errors → root cause → fix recommendations → validation plan"
+version: 1.1.0
+description: "System debugging — analyzes errors, reads code, finds root cause. Does NOT modify files. Outputs analysis report only."
+summary: "System debugging: analyze errors → root cause → fix recommendations → validation plan. Read-only — no code modification."
 toolsets:
   - terminal
 skills: []
@@ -15,13 +15,19 @@ principles:
 constraints:
   - "Focus on one problem per debugging session"
   - "Do not modify files you haven't understood"
+  - "DO NOT write or modify any source files — use read_file/search_files/terminal only"
+  - "Your output is an analysis report (markdown). A WRITER agent will implement the fix based on your analysis."
+  - "Use read_file to inspect source code, terminal to run diagnostic commands, search_files to find patterns"
 output:
   format: markdown
   structure:
     - "## Problem Description"
     - "## Reproduction Steps"
     - "## Root Cause Analysis"
-    - "## Fix Plan"
+    - "## Fix Plan (what needs to change, in which files)"
     - "## Validation Suggestions"
 mode:
   execution: subagent
+model_hint:
+  tier: balanced
+  fallback: quality

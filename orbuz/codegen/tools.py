@@ -93,21 +93,93 @@ READ_FILE_SCHEMA = {
     "type": "function",
     "function": {
         "name": "read_file",
-        "description": "Read the contents of a text file.",
+        "description": "Read a text file with line numbers. Supports offset and limit for large files.",
         "parameters": {
             "type": "object",
             "properties": {
                 "path": {
                     "type": "string",
-                    "description": "Path to the file to read"
+                    "description": "Path to the file to read (relative to project root or absolute)"
                 },
-                "max_length": {
+                "offset": {
                     "type": "integer",
-                    "description": "Max characters to return (default: 8000)",
-                    "default": 8000,
+                    "description": "Line number to start reading from (1-indexed, default: 1)",
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": "Max lines to return (default: 500, max: 2000)",
                 },
             },
             "required": ["path"],
+        },
+    },
+}
+
+PATCH_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "patch",
+        "description": (
+            "Targeted find-and-replace edit in a file. Use fuzzy matching so "
+            "minor whitespace/indentation differences won't break it. "
+            "Returns a unified diff. Safe for surgical changes without rewriting "
+            "the entire file."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "File path (relative to project root or absolute)"
+                },
+                "old_string": {
+                    "type": "string",
+                    "description": "Exact text to find and replace. Include surrounding context for uniqueness."
+                },
+                "new_string": {
+                    "type": "string",
+                    "description": "Replacement text"
+                },
+            },
+            "required": ["path", "old_string", "new_string"],
+        },
+    },
+}
+
+SEARCH_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "search_files",
+        "description": (
+            "Search file contents with regex, or find files by name. "
+            "Uses ripgrep internally — faster than grep."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "pattern": {
+                    "type": "string",
+                    "description": "Regex pattern to search for in file contents, or glob pattern (e.g. '*.rs') to find files by name"
+                },
+                "target": {
+                    "type": "string",
+                    "enum": ["content", "files"],
+                    "description": "'content' to search inside files, 'files' to find files by name"
+                },
+                "path": {
+                    "type": "string",
+                    "description": "Directory or file to search in (default: project root)"
+                },
+                "file_glob": {
+                    "type": "string",
+                    "description": "Filter by file pattern (e.g. '*.rs' to only search Rust files)"
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": "Max results (default: 50)",
+                },
+            },
+            "required": ["pattern"],
         },
     },
 }
@@ -117,6 +189,8 @@ TOOL_SCHEMAS: list[dict] = [
     WRITE_FILE_SCHEMA,
     TERMINAL_SCHEMA,
     READ_FILE_SCHEMA,
+    PATCH_SCHEMA,
+    SEARCH_SCHEMA,
 ]
 
 # ── Dispatch ──
@@ -148,6 +222,10 @@ def dispatch(
         return _terminal(args, pp)
     elif tool_name == "read_file":
         return _read_file(args, pp)
+    elif tool_name == "patch":
+        return _patch(args, pp)
+    elif tool_name == "search_files":
+        return _search_files(args, pp)
     else:
         return _hermes_fallback(tool_name, args)
 
@@ -193,23 +271,119 @@ def _terminal(args: dict, project_path: str) -> str:
 
 def _read_file(args: dict, project_path: str) -> str:
     path = args.get("path", "")
-    max_len = args.get("max_length", 8000)
+    offset = args.get("offset", 1)
+    limit = args.get("limit", 500)
     if not path:
         return json.dumps({"error": "path is required"})
     fp = Path(project_path) / path if not Path(path).is_absolute() else Path(path)
     if not fp.exists():
         return json.dumps({"error": f"File not found: {fp}"})
     try:
-        content = fp.read_text()
-        truncated = len(content) > max_len
-        if truncated:
-            content = content[:max_len] + "\n... [truncated]"
+        lines = fp.read_text().splitlines(keepends=True)
+        total = len(lines)
+        start = max(0, (offset or 1) - 1)
+        end = min(total, start + (limit or 500))
+        selected = lines[start:end]
+        # Format with line numbers
+        out_lines = []
+        for i, line in enumerate(selected, start=start + 1):
+            out_lines.append(f"{i}|{line.rstrip()}")
+        content = "\n".join(out_lines)
         return json.dumps({
             "content": content,
             "path": str(fp),
-            "bytes": len(content),
-            "truncated": truncated,
+            "total_lines": total,
+            "lines_shown": len(selected),
+            "offset": start + 1,
+            "truncated": end < total,
         })
+    except Exception as e:
+        return json.dumps({"error": str(e)})
+
+
+def _patch(args: dict, project_path: str) -> str:
+    """Targeted find-and-replace edit in a file."""
+    path = args.get("path", "")
+    old_string = args.get("old_string", "")
+    new_string = args.get("new_string", "")
+    if not path or not old_string:
+        return json.dumps({"error": "path and old_string are required"})
+    fp = Path(project_path) / path if not Path(path).is_absolute() else Path(path)
+    if not fp.exists():
+        return json.dumps({"error": f"File not found: {fp}"})
+    try:
+        content = fp.read_text()
+        if old_string not in content:
+            # Try fuzzy: show close match locations
+            import difflib
+            lines = content.splitlines()
+            closest = difflib.get_close_matches(old_string, lines, n=3, cutoff=0.5)
+            hints = [f"  near line: {l[:80]}" for l in closest] if closest else []
+            return json.dumps({
+                "error": "old_string not found in file",
+                "hints": hints or ["Use read_file to see the actual content first"],
+            })
+        new_content = content.replace(old_string, new_string, 1)
+        fp.write_text(new_content)
+        return json.dumps({
+            "ok": True,
+            "path": str(fp),
+            "bytes_changed": len(old_string),
+        })
+    except Exception as e:
+        return json.dumps({"error": str(e)})
+
+
+def _search_files(args: dict, project_path: str) -> str:
+    """Search file contents with regex or find files by name (uses ripgrep)."""
+    pattern = args.get("pattern", "")
+    target = args.get("target", "content")
+    path = args.get("path") or project_path
+    file_glob = args.get("file_glob", "")
+    limit = min(args.get("limit", 50), 200)
+    if not pattern:
+        return json.dumps({"error": "pattern is required"})
+    spath = Path(project_path) / path if not Path(str(path)).is_absolute() else Path(str(path))
+    spath_str = str(spath)
+    try:
+        if target == "files":
+            # Find files by glob pattern
+            from glob import glob
+            matches = []
+            for f in sorted(glob(f"{spath_str}/**/{pattern}", recursive=True)):
+                if Path(f).is_file():
+                    st = Path(f).stat()
+                    matches.append(f"  {Path(f).relative_to(spath_str)}  ({st.st_size} bytes)")
+                    if len(matches) >= limit:
+                        break
+            return json.dumps({"ok": True, "target": "files", "matches": matches, "count": len(matches)})
+        else:
+            # Content search via ripgrep
+            cmd_parts = ["rg", "-n", "--no-heading"]
+            if file_glob:
+                cmd_parts.extend(["-g", file_glob])
+            cmd_parts.extend([pattern, spath_str])
+            sp = subprocess.run(
+                cmd_parts, capture_output=True, text=True, timeout=30
+            )
+            if sp.returncode == 0:
+                lines = sp.stdout.strip().split("\n")[:limit]
+                return json.dumps({"ok": True, "target": "content", "matches": lines, "count": len(lines)})
+            elif sp.returncode == 1:
+                return json.dumps({"ok": True, "target": "content", "matches": [], "count": 0, "note": "No matches found"})
+            else:
+                return json.dumps({"error": f"rg failed: {sp.stderr[:500]}"})
+    except FileNotFoundError:
+        # rg not installed, fall back to grep
+        try:
+            cmd_parts = ["grep", "-rn", pattern, spath_str]
+            if file_glob:
+                cmd_parts.extend(["--include", file_glob])
+            sp = subprocess.run(cmd_parts, capture_output=True, text=True, timeout=30)
+            lines = sp.stdout.strip().split("\n")[:limit] if sp.stdout.strip() else []
+            return json.dumps({"ok": True, "target": "content", "matches": lines, "count": len(lines)})
+        except Exception as e:
+            return json.dumps({"error": f"search failed: {e}"})
     except Exception as e:
         return json.dumps({"error": str(e)})
 
