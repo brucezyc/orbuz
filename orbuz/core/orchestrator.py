@@ -152,10 +152,13 @@ class Orchestrator:
             "### Codegen Pattern Details\n"
             "For codegen stages, EACH agent MUST include an 'actions' array:\n"
             "  actions: [\n"
-            '    {"action": "write_file", "file_path": "path/to/file.rs",\n'
-            '     "content": "...file content..."},\n'
+            '    {"action": "write_file", "file_path": "src/main.rs",\n'
+            '     "content": "fn main() { println!(\\\"hello\\\"); }"},\n'
             '    {"action": "run", "command": "cd {project_dir} && cargo check"}\n'
             "  ]\n"
+            "CRITICAL: The 'content' field in write_file actions MUST contain the FULL FILE CONTENTS (actual code), "
+            "NOT a description or summary. Write the complete source code that would compile and work. "
+            "File paths are RELATIVE to the project_dir.\n"
             "Set 'project_dir' (absolute path) for codegen stages.\n"
             "### Parallel Codegen (Fanout)\n"
             "For multi-file projects with INDEPENDENT files:\n"
