@@ -340,6 +340,16 @@ class Dispatcher:
                     messages.append({"role": "assistant", "content": resp.content or ""})
                     messages.append({"role": "user", "content": "You have tools available but did not call any. You MUST use the terminal function to execute commands. Call the function now."})
                     continue
+                # If we already retried (round 1+) and agent still didn't call tools,
+                # return failure so handle_failure can escalate
+                if agent_def.toolsets and round_num > 0 and not all_output_parts:
+                    return DispatcherResult(
+                        success=False,
+                        output="",
+                        error="Agent did not call tools after retry (no tool_calls in 2 rounds)",
+                        tier_used=tier,
+                        model_used=model_name,
+                    )
                 return DispatcherResult(
                     success=True,
                     output="\n\n".join(all_output_parts) or "",
@@ -406,24 +416,30 @@ class Dispatcher:
         failed = failed_tier or prev_result.tier_used
         fallback = hint.fallback or "quality"
 
-        # Retry at a higher tier
+        # Retry at a higher tier — try fallback first, then quality as last resort
+        tiers_to_try = []
         if fallback != failed:
-            print(f"    ⚠️ {agent_def.name} failed at {failed}, escalating to {fallback} for retry")
+            tiers_to_try.append(fallback)
+        # If the current tier is the highest we'd normally try, push one more step
+        current_failed = failed
+        for attempt_tier in tiers_to_try + (["quality"] if fallback == failed and fallback != "quality" else []):
+            print(f"    ⚠️ {agent_def.name} failed at {current_failed}, escalating to {attempt_tier} for retry")
             retry_context = context + (
-                f"\n\nNote: Previously failed at {failed} tier, error: {prev_result.error}"
+                f"\n\nNote: Previously failed at {current_failed} tier, error: {prev_result.error}"
             )
             if tools and project_path:
                 from orbuz.codegen.tools import TOOL_SCHEMAS
                 result = self.run_agent_with_tools(
-                    agent_def, goal, retry_context, tier=fallback,
+                    agent_def, goal, retry_context, tier=attempt_tier,
                     tools=TOOL_SCHEMAS, project_path=project_path,
                 )
             else:
-                result = self.run_agent(agent_def, goal, retry_context, tier=fallback)
+                result = self.run_agent(agent_def, goal, retry_context, tier=attempt_tier)
             if result.success:
                 return result
+            current_failed = attempt_tier
 
-        # If reentrant and escalation also failed → flag for decomposition
+        # If reentrant and all escalation also failed → flag for decomposition
         if hint.reentrant:
             print(f"    ⚠️ {agent_def.name} failed at both tiers, marked for decomposition (reentrant)")
             return DispatcherResult(
