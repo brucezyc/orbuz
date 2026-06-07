@@ -370,6 +370,26 @@ class Dispatcher:
             for p in agent_def.principles:
                 parts.append(f"- {p}")
 
+        if agent_def.constraints:
+            parts.append("\n## Constraints")
+            for c in agent_def.constraints:
+                parts.append(f"- {c}")
+
+        # Tool-use directive — inject if agent has toolsets
+        if agent_def.toolsets:
+            parts.append(
+                "\n## Tools Available"
+                "\nYou have access to the following tools via function calling:"
+                "\n- write_file(path, content): Write a new file"
+                "\n- terminal(command): Run a shell command"
+                "\n- read_file(path, offset, limit): Read a file with line numbers"
+                "\n- patch(path, old_string, new_string): Targeted find-and-replace edit"
+                "\n- search_files(pattern, target, path, file_glob): Search codebase"
+                "\nCRITICAL: You MUST use these tools to do your work."
+                "\nDo NOT describe what you would do — call the tool with the actual content."
+                "\nEvery response should either (a) call a tool, or (b) deliver the final result."
+            )
+
         if agent_def.output.structure:
             parts.append("\n## Output Structure Requirements")
             for s in agent_def.output.structure:
@@ -457,6 +477,8 @@ class Dispatcher:
 
         parts.append(
             "\nPlease complete the work according to the requirements above."
+            "\nUse your available tools (write_file, terminal, read_file, patch, search_files)"
+            "\nto read, write, and verify files. Do NOT describe what you would do — call the tools."
             "\nIf you have new findings relevant to other agents' domains, publish claims in JSON format at the end of your output."
         )
 
