@@ -185,7 +185,7 @@ class Orchestrator:
         )
 
         resp = self.llm.chat(
-            model_tier="balanced",
+            model_tier="quality",
             system=system,
             messages=[{"role": "user", "content": prompt}],
             max_tokens=8192,

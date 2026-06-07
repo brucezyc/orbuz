@@ -28,8 +28,11 @@ Config file format:
 
     # Per-tier overrides
     quality:
+      model: anthropic/claude-opus-4
       api_key: sk-ant-...
       api_base: https://api.anthropic.com
+    balanced:
+      model: deepseek/deepseek-v4-flash
     cheap:
       api_key: sk-deep-...
 
@@ -71,7 +74,7 @@ def _apply_config(args, cfg: dict):
     # Per-tier keys
     for tier in ("quality", "balanced", "cheap"):
         tier_cfg = cfg.get(tier, {})
-        for suffix in ("api_key", "api_base"):
+        for suffix in ("model", "api_key", "api_base"):
             cli_attr = f"{tier}_{suffix}"
             if tier_cfg.get(suffix) and getattr(args, cli_attr, None) is None:
                 setattr(args, cli_attr, tier_cfg[suffix])
