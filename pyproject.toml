@@ -18,3 +18,7 @@ orbuz = "orbuz.cli.main:main"
 
 [tool.setuptools.packages.find]
 include = ["orbuz*"]
+include_package_data = true
+
+[tool.setuptools.package_data]
+orbuz = ["agents/*.yaml", "agents/index.yaml"]
