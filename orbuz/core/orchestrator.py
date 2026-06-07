@@ -174,14 +174,16 @@ class Orchestrator:
         if not resp.success:
             print(f"  ⚠️ Recon LLM call failed: {resp.error}")
             print(f"  → Falling back to sample plan")
-            return PlanJSON.sample(workflow_name=workflow_name, topic=topic)
+            return self._fallback_plan(workflow_name, topic, project_dir)
 
         # ── Parse JSON ──
         plan_data = self._parse_llm_json(resp.content)
         if plan_data is None:
             print(f"  ⚠️ Unable to parse LLM output as JSON")
+            print(f"  Raw response ({len(resp.content)} chars):")
+            print(f"  {resp.content[:500]}")
             print(f"  → Falling back to sample plan")
-            return PlanJSON.sample(workflow_name=workflow_name, topic=topic)
+            return self._fallback_plan(workflow_name, topic, project_dir)
 
         # ── Build PlanJSON ──
         try:
@@ -206,7 +208,7 @@ class Orchestrator:
             # Validate stages are not empty
             if not plan.plan.get("stages"):
                 print(f"  ⚠️ LLM returned plan with no stages, falling back to sample")
-                return PlanJSON.sample(workflow_name=workflow_name, topic=topic)
+                return self._fallback_plan(workflow_name, topic, project_dir)
 
             stages_count = len(plan.plan["stages"])
             print(f"  ✅ Plan generated successfully: {stages_count} stage(s)")
@@ -215,9 +217,27 @@ class Orchestrator:
         except Exception as e:
             print(f"  ⚠️ PlanJSON construction failed: {e}")
             print(f"  → Falling back to sample plan")
-            return PlanJSON.sample(workflow_name=workflow_name, topic=topic)
+            return self._fallback_plan(workflow_name, topic, project_dir)
 
     # ── JSON parsing helpers ──
+
+    @staticmethod
+    def _fallback_plan(workflow_name: str, topic: str,
+                       project_dir: str | None = None) -> PlanJSON:
+        """Choose appropriate fallback: codegen_sample for code tasks, sample for research."""
+        codegen_keywords = [
+            "build", "create", "write", "generate", "code", "server",
+            "app", "project", "rust", "axum", "backend", "frontend",
+            "api", "endpoint", "upload", "download", "file",
+        ]
+        topic_lower = topic.lower()
+        is_codegen = any(kw in topic_lower for kw in codegen_keywords)
+        if is_codegen and project_dir:
+            return PlanJSON.codegen_sample(
+                workflow_name=workflow_name, topic=topic,
+                project_dir=project_dir
+            )
+        return PlanJSON.sample(workflow_name=workflow_name, topic=topic)
 
     @staticmethod
     def _parse_llm_json(text: str) -> dict | None:

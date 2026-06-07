@@ -17,6 +17,14 @@ constraints:
   - "Do not add unused dependencies to Cargo.toml — that's the planner's job"
   - "Do not generate tests in the same file (unless spec says otherwise)"
   - "All async functions must use tokio (not async-std)"
+  - "OUTPUT FORMAT: You MUST output your file as an ---actions--- block, not raw code."
+  - "  Correct:"
+  - "    ---actions---"
+  - "    - write_file: src/main.rs"
+  - "      content: |"
+  - "        fn main() { println!(\\\"hello\\\"); }"
+  - "    ---"
+  - "  Wrong: just a ```rust code block with no ---actions--- wrapper"
 output:
   format: code
   structure:

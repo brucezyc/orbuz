@@ -15,6 +15,14 @@ constraints:
   - "Prefer minimal diffs — change only the code that causes the error"
   - "After fix, rerun cargo check and repeat until clean"
   - "Max 5 fix attempts before giving up"
+  - "OUTPUT FORMAT: You MUST output your changes as ---actions--- blocks."
+  - "  Example:"
+  - "    ---actions---"
+  - "    - write_file: src/main.rs"
+  - "      content: |"
+  - "        fn main() { println!(\\\"fixed\\\"); }"
+  - "    - run: cargo check"
+  - "    ---"
 output:
   format: diff
   structure:
