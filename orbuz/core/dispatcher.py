@@ -251,6 +251,7 @@ class Dispatcher:
                 system=system,
                 messages=messages,
                 tools=tools,
+                temperature=0.0 if tools else 0.5,
             )
 
             total_in_tokens += resp.input_tokens
@@ -394,22 +395,24 @@ class Dispatcher:
                 "\nIf you can make progress by calling a function, do it."
             )
 
-        if agent_def.output.structure:
+        if agent_def.output.structure and not agent_def.toolsets:
             parts.append("\n## Output Structure Requirements")
             for s in agent_def.output.structure:
                 parts.append(f"- {s}")
 
-        parts.append(
-            "\n## Claims Format"
-            "\nAt the end of your output, publish your key findings (if any) using the following JSON format:"
-            "\n```json"
-            '\n{"claims": ['
-            '\n  {"statement": "...", "confidence": 0.9, "source": "...", '
-            '\n"tags": ["..."], "relevance": ["other-agent-name"]}'
-            "\n]}"
-            "\n```"
-            "\nYou may omit this if there are no cross-agent relevant findings."
-        )
+        # Claims format — skip for tool-using agents (they call functions, not write JSON blocks)
+        if not agent_def.toolsets:
+            parts.append(
+                "\n## Claims Format"
+                "\nAt the end of your output, publish your key findings (if any) using the following JSON format:"
+                "\n```json"
+                '\n{"claims": ['
+                '\n  {"statement": "...", "confidence": 0.9, "source": "...", '
+                '\n"tags": ["..."], "relevance": ["other-agent-name"]}'
+                "\n]}"
+                "\n```"
+                "\nYou may omit this if there are no cross-agent relevant findings."
+            )
 
         return "\n".join(parts)
 
@@ -481,10 +484,17 @@ class Dispatcher:
 
         parts.append(
             "\nPlease complete the work according to the requirements above."
-            "\nUse your available tools (write_file, terminal, read_file, patch, search_files)"
-            "\nto read, write, and verify files. Do NOT describe what you would do — call the tools."
-            "\nIf you have new findings relevant to other agents' domains, publish claims in JSON format at the end of your output."
         )
+        if agent_def.toolsets:
+            parts.append(
+                "\nUse your available tools to read, write, and modify files."
+                "\nCall the function — do NOT describe what you would do."
+            )
+        else:
+            parts.append(
+                "\nIf you have new findings relevant to other agents' domains, "
+                "publish claims in JSON format at the end of your output."
+            )
 
         return "\n".join(parts)
 
