@@ -144,45 +144,6 @@ def main():
                         help="list=list agents, show=<name>=view details")
     agents.add_argument("--agent-dir", default=None, help="Agent YAML directory")
 
-    # orbuz codegen
-    codegen = sub.add_parser("codegen", help="Code generation with feedback loops")
-    codegen.add_argument("--project-dir", required=True,
-                         help="Project root directory")
-    codegen.add_argument("--goal", default="",
-                         help="Natural language goal description")
-    codegen.add_argument("--spec", default=None,
-                         help="YAML spec file for multi-file generation")
-    codegen.add_argument("--project-context", default="off", choices=["on", "off"],
-                         help="Scan project structure and inject context (default: off)")
-    codegen.add_argument("--language", default=None,
-                         help="Force language (rust/python/cpp). Auto-detect if omitted.")
-    codegen.add_argument("--compile-loop", default="off", choices=["on", "off"],
-                         help="Auto-fix compile errors with LLM (default: off)")
-    codegen.add_argument("--compile-command", default="cargo check 2>&1",
-                         help="Compile/check command (default: cargo check)")
-    codegen.add_argument("--compile-max-attempts", type=int, default=5,
-                         help="Max compile-fix attempts (default: 5)")
-    codegen.add_argument("--oracle", default="off", choices=["on", "off"],
-                         help="Run oracle benchmark and compare to expected (default: off)")
-    codegen.add_argument("--oracle-command", default="",
-                         help="Oracle benchmark command")
-    codegen.add_argument("--oracle-expected", default=None,
-                         help="YAML file with expected values")
-    codegen.add_argument("--impact-analysis", default="off", choices=["on", "off"],
-                         help="Analyze cross-file dependency impact (default: off)")
-    codegen.add_argument("--no-llm", action="store_true",
-                         help="Skip LLM calls (just scan/report)")
-    codegen.add_argument("--api-key", default=None,
-                         help="LLM API key")
-    codegen.add_argument("--quality-model", default=None,
-                         help="Model for generation tasks (default: $DEEPSEEK_MODEL or deepseek/deepseek-v4-flash)")
-    codegen.add_argument("--balanced-model", default=None,
-                         help="Balanced model ID for code generation")
-    codegen.add_argument("--cheap-model", default=None,
-                         help="Cheap model ID for code generation")
-    codegen.add_argument("--tier", default="balanced", choices=["cheap", "balanced", "quality"],
-                         help="Model tier for code generation")
-
     args = parser.parse_args()
 
     # Load config file if specified (overrides defaults, CLI args win)
@@ -198,8 +159,9 @@ def main():
         _cmd_stop(args)
     elif args.command == "agents":
         _cmd_agents(args)
-    elif args.command == "codegen":
-        _cmd_codegen(args)
+    else:
+        # Unknown command — show help
+        parser.print_help()
 
 
 def _cmd_run(args):
@@ -285,10 +247,10 @@ def _cmd_run(args):
         plan = orch.recon(topic=topic, workflow_name=args.workflow_name,
                           project_dir=project_dir)
 
-        # Inject project_dir into codegen stages (from CLI arg, overrides LLM guess)
+        # Inject project_dir into all stages (unified: no codegen/workflow distinction)
         stages = plan.get('plan', {}).get('stages', [])
         for stage in stages:
-            if stage.get('pattern') == 'codegen':
+            if project_dir:
                 stage['project_dir'] = project_dir
 
         # 2. Display plan -> wait for user approval
@@ -383,50 +345,6 @@ def _cmd_agents(args):
     elif args.action == "show":
         name = input("agent name: ")
         print(f"View full definition of {name} (TODO)")
-
-
-def _cmd_codegen(args):
-    """
-    ⚠️ 已废弃: orbuz codegen 已合并到 orbuz run --mode codegen
-
-    这条命令在 v0.2 中保留为向后兼容的别名。
-    内部直接委托给 _cmd_run，使用 --mode codegen 标志。
-
-    用法迁移:
-        orbuz run --mode codegen --project-dir ./myproject --goal "..." --language rust
-    """
-    print("⚠️  orbuz codegen is deprecated. Use: orbuz run --mode codegen ...")
-    print("")
-    # 把 codegen 的参数转换成 run 的参数
-    from argparse import Namespace
-    run_args = Namespace(
-        command="run",
-        topic=args.project_dir,  # project-dir 作为 topic
-        goal=args.goal,
-        language=args.language,
-        project_dir=args.project_dir,
-        auto=True,  # codegen 模式下自动通过
-        mode="codegen",
-        config=args.config,
-        quality_model=args.quality_model,
-        balanced_model=args.balanced_model,
-        cheap_model=args.cheap_model,
-        api_key=args.api_key,
-        api_base=args.api_base,
-        quality_api_key=None,
-        quality_api_base=None,
-        balanced_api_key=None,
-        balanced_api_base=None,
-        cheap_api_key=None,
-        cheap_api_base=None,
-        guardrails=args.guardrails,
-        guardrails_tools=args.guardrails_tools,
-        workflow_name="codegen",
-        agent_dir=args.agent_dir,
-        resume=getattr(args, 'resume', False),
-    )
-    _cmd_run(run_args)
-
 
 def _wait_approval() -> bool:
     """CLI prompt waiting for user approval of the plan"""

@@ -253,21 +253,9 @@ class Executor:
                     yield {"type": "error", "msg": f"Dependency {dep_id} not completed (status={dep_status})"}
                     return
 
-            # Execute by pattern
-            pattern = stage.get("pattern", "fanout")
-            if pattern == "fanout":
-                yield from self._exec_fanout(run_id, stage, idx)
-            elif pattern == "pipeline":
-                yield from self._exec_pipeline(run_id, stage, idx)
-            elif pattern == "producer_reviewer":
-                yield from self._exec_producer_reviewer(run_id, stage, idx)
-            elif pattern == "code_review":
-                yield from self._exec_code_review(run_id, stage, idx)
-            elif pattern == "codegen":
-                yield from self._exec_codegen(run_id, stage, idx)
-            else:
-                yield {"type": "error", "msg": f"Unknown pattern: {pattern}"}
-                return
+            # Execute by pattern (unified: all patterns use pipeline)
+            pattern = stage.get("pattern", "pipeline")
+            yield from self._exec_pipeline(run_id, stage, idx)
 
             # Mark complete
             self.ws.set_stage_completed(run_id, stage_id)
@@ -663,8 +651,8 @@ class Executor:
                 defn, agent_cfg["goal"],
                 context=combined_context,
                 tier=tier,
-                tools=TOOL_SCHEMAS if stage.get("project_dir") else None,
-                project_path=str(project_path) if stage.get("project_dir") else None,
+                tools=TOOL_SCHEMAS if project_path else None,
+                project_path=str(project_path) if project_path else None,
             )
             self._cost_tracker.record_result(agent_cfg["role"], result)
             if not result.success:

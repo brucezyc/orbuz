@@ -120,7 +120,7 @@ class PlanJSON(BaseModel):
                     {
                         "id": "01_codegen",
                         "name": "Generate project code",
-                        "pattern": "codegen",
+                        "pattern": "pipeline",
                         "project_dir": project_dir,
                         "agents": [
                             {

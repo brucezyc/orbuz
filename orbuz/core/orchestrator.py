@@ -145,10 +145,10 @@ class Orchestrator:
             '  ]\n'
             '}\n\n'
             "Available patterns:\n"
-            "  - fanout (parallel agents, optionally merged)\n"
             "  - pipeline (sequential agents, output feeds next)\n"
-            "  - producer_reviewer (produce -> review -> cycle)\n"
-            "  - codegen (agents write files via 'actions' array)\n"
+            "Use ONLY 'pipeline' pattern for all stages — unified execution model.\n"
+            "Agent selection: for code generation/fixing use 'codegen-writer' or 'debugger'; "
+            "for compilation use 'codegen-compiler'.\n"
             "### Codegen Pattern Details\n"
             "For codegen stages, you have TWO approaches:\n"
             "  Approach A (SIMPLE/BRIEF content — use manifest actions):\n"
