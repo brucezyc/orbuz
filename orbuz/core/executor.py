@@ -622,47 +622,89 @@ class Executor:
     # ── Codegen pattern with YAML actions execution ──
 
     def _exec_codegen(self, run_id, stage, idx):
-        """Codegen pattern: dispatch agents sequentially, execute actions from output.
+        """Codegen pattern: dispatch agents or execute manifest actions.
 
-        Each agent can output YAML actions blocks:
-            ---actions---
-            - write_file: path/to/file.rs
-              content: |
-                fn main() {}
-            - run: cargo check
-            ---
+        Two modes:
+          1. Manifest actions — agent_cfg has 'actions' list (JSON from Orchestrator)
+             Execute write_file/run directly, skip LLM call.
+          2. Agent output — dispatch the agent, parse ---actions--- blocks from output.
+
+        If stage has 'fanout: true', agents with manifest actions run in parallel
+        (independent write/run, no cross-agent context).
         """
         stage_id = stage['id']
         agents_cfg = stage.get('agents', [])
         project_dir = stage.get('project_dir', '.')
         project_path = Path(project_dir).resolve()
+        is_fanout = stage.get('fanout', False)
 
         yield {'type': 'progress', 'stage': stage_id,
-               'msg': f'Starting codegen ({len(agents_cfg)} agents)'}
+               'msg': f'Starting codegen ({len(agents_cfg)} agents)' +
+                      (', fanout mode' if is_fanout else '')}
 
         prev_output = ''
-        for i, agent_cfg in enumerate(agents_cfg):
-            role = agent_cfg['role']
-            defn = load_agent(role)
-            tier = agent_cfg.get('model_assignment', {}).get('tier', 'balanced')
 
+        if is_fanout:
+            # Fanout: collect all actions from agents, execute together
+            all_results = []
+            for agent_cfg in agents_cfg:
+                role = agent_cfg['role']
+                if 'actions' in agent_cfg:
+                    # Manifest actions - execute immediately
+                    yield {'type': 'progress', 'stage': stage_id,
+                           'msg': f'  {role}: {len(agent_cfg["actions"])} manifest actions'}
+                    results = self._exec_manifest_actions(
+                        agent_cfg['actions'], project_path
+                    )
+                    for a in results:
+                        status = 'OK' if a.get('exit_code', 0) == 0 else 'FAIL'
+                        yield {'type': 'progress', 'stage': stage_id,
+                               'msg': f'    {a.get("type","?")}: {a.get("path","") or a.get("command","")} [{status}]'}
+                    all_results.extend(results)
             yield {'type': 'progress', 'stage': stage_id,
-                   'msg': f'Running {role}... ({i+1}/{len(agents_cfg)})'}
+                   'msg': f'  done: {sum(1 for r in all_results if r.get("exit_code",0)==0 or "path" in r)}/{len(all_results)} actions OK'}
+        else:
+            # Sequential: each agent builds on previous
+            for i, agent_cfg in enumerate(agents_cfg):
+                role = agent_cfg['role']
 
-            result = self.dispatcher.run_agent(
-                defn, agent_cfg['goal'],
-                context=prev_output if prev_output else '',
-                tier=tier,
-            )
-            self._cost_tracker.record_result(role, result)
-            self.ws.write_output(run_id, stage_id, role, result.output)
+                # Mode 1: Manifest actions (pre-built by Orchestrator, no LLM call)
+                if 'actions' in agent_cfg:
+                    yield {'type': 'progress', 'stage': stage_id,
+                           'msg': f'  executing {len(agent_cfg["actions"])} manifest actions...'}
+                    results = self._exec_manifest_actions(
+                        agent_cfg['actions'], project_path
+                    )
+                    for a in results:
+                        status = 'OK' if a.get('exit_code', 0) == 0 else 'FAIL'
+                        yield {'type': 'progress', 'stage': stage_id,
+                               'msg': f'    {a.get("type","?")}: {a.get("path","") or a.get("command","")} [{status}]'}
+                        if a.get('stderr'):
+                            yield {'type': 'progress', 'stage': stage_id,
+                                   'msg': f'      stderr: {a["stderr"][:200]}'}
+                    continue
 
-            actions = self._exec_actions(result.output, project_path)
-            if actions:
+                # Mode 2: Dispatch agent, parse actions from output
+                defn = load_agent(role)
+                tier = agent_cfg.get('model_assignment', {}).get('tier', 'balanced')
+
                 yield {'type': 'progress', 'stage': stage_id,
-                       'msg': f'  -> executed {len(actions)} actions from {role}'}
+                       'msg': f'Running {role}... ({i+1}/{len(agents_cfg)})'}
 
-            prev_output = result.output
+                result = self.dispatcher.run_agent(
+                    defn, agent_cfg['goal'],
+                    context=prev_output if prev_output else '',
+                    tier=tier,
+                )
+                self._cost_tracker.record_result(role, result)
+                self.ws.write_output(run_id, stage_id, role, result.output)
+
+                actions = self._exec_actions(result.output, project_path)
+                if actions:
+                    yield {'type': 'progress', 'stage': stage_id,
+                           'msg': f'  -> executed {len(actions)} actions from {role}'}
+
+                prev_output = result.output
 
         yield {'type': 'progress', 'stage': stage_id, 'msg': 'codegen complete'}
 
@@ -795,6 +837,73 @@ class Executor:
 
                 except Exception as e:
                     results.append({'type': 'error', 'action': action_type, 'error': str(e)})
+
+        return results
+
+
+    @staticmethod
+    def _exec_manifest_actions(actions: list[dict], project_path: Path) -> list[dict]:
+        """Execute actions from manifest JSON (pre-built by Orchestrator).
+
+        Manifest action format:
+          {"action": "write_file", "file_path": "...", "content": "..."}
+          {"action": "run", "command": "..."}
+
+        Returns list of {type, path|command, exit_code, stdout, stderr}.
+        """
+        import subprocess as _sp
+        results = []
+        for act in actions:
+            try:
+                action_type = act.get('action', '')
+                if action_type == 'write_file':
+                    file_path = project_path / act['file_path']
+                    content = act.get('content', '')
+                    file_path.parent.mkdir(parents=True, exist_ok=True)
+                    file_path.write_text(content)
+                    results.append({'type': 'write_file', 'path': str(file_path)})
+
+                elif action_type == 'run':
+                    cmd = act.get('command', '')
+                    if not cmd:
+                        continue
+                    # Fix wrong cd paths in generated commands
+                    import re as _re
+                    cmd = _re.sub(
+                        r'\bcd\s+(/[^\s;|&]+)',
+                        lambda m: f'cd {project_path}' if not Path(m.group(1)).exists() else m.group(0),
+                        cmd
+                    )
+                    sp = _sp.run(
+                        cmd, shell=True, capture_output=True, text=True,
+                        cwd=str(project_path), timeout=120,
+                    )
+                    results.append({
+                        'type': 'run', 'command': cmd,
+                        'stdout': sp.stdout[-500:], 'stderr': sp.stderr[-500:],
+                        'exit_code': sp.returncode,
+                    })
+
+                elif action_type == 'delete':
+                    target = project_path / act['file_path']
+                    if target.exists():
+                        if target.is_file():
+                            target.unlink()
+                        elif target.is_dir():
+                            import shutil
+                            shutil.rmtree(target)
+                        results.append({'type': 'delete', 'path': act['file_path']})
+
+                elif action_type == 'append_file':
+                    file_path = project_path / act['file_path']
+                    content = act.get('content', '')
+                    file_path.parent.mkdir(parents=True, exist_ok=True)
+                    with open(file_path, 'a') as f:
+                        f.write(content)
+                    results.append({'type': 'append_file', 'path': str(file_path)})
+
+            except Exception as e:
+                results.append({'type': 'error', 'action': action_type, 'error': str(e)})
 
         return results
 

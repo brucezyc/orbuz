@@ -34,7 +34,8 @@ class Orchestrator:
         self.llm = llm_client
         self.agent_dir = Path(agent_dir) if agent_dir else Path.cwd() / "agents"
 
-    def recon(self, topic: str, workflow_name: str | None = None) -> dict:
+    def recon(self, topic: str, workflow_name: str | None = None,
+              project_dir: str | None = None) -> dict:
         """Execute Recon → return plan.json (dict)"""
         name = workflow_name or topic.replace(" ", "-")[:40].lower()
 
@@ -49,11 +50,11 @@ class Orchestrator:
             return plan.model_dump()
 
         # Real mode: use LLM for recon → output plan (TODO)
-        plan = self._real_recon(topic, name, index)
+        plan = self._real_recon(topic, name, index, project_dir=project_dir)
         return plan.model_dump()
 
     def _real_recon(self, topic: str, workflow_name: str,
-                    index) -> PlanJSON:
+                    index, project_dir: str | None = None) -> PlanJSON:
         """Real mode: LLM analyzes the topic → designs a plan → parses JSON output"""
 
         # ── Build prompt ──
@@ -84,7 +85,13 @@ class Orchestrator:
 
         prompt = (
             f"## Topic\n{topic}\n\n"
-            f"## Available Agent Library\n{''.join(agent_list_lines)}\n\n"
+            f"## Project Directory\n{project_dir or '(not specified)'}\n\n"
+            "Use this path for any 'cd' commands in codegen run actions.\n"
+            f"## Available Agent Library\n{chr(10).join(agent_list_lines)}\n\n"
+            "IMPORTANT: Use agent names EXACTLY as they appear in the library above.\n"
+            "Do NOT invent new role names — pick from the listed agents.\n"
+            "For code writing tasks, use 'codegen-writer' (not 'developer' or 'code-generator').\n"
+            "For compilation/fixing, use 'codegen-compiler'.\n"
             "## Output Requirements\n"
             "Output a JSON strictly following this structure (no extra text, no markdown wrapping):\n\n"
             "```json\n"
@@ -140,7 +147,16 @@ class Orchestrator:
             "  - fanout (parallel research agents, optionally merged)\n"
             "  - pipeline (sequential agents, output feeds next)\n"
             "  - producer_reviewer (produce -> review -> cycle)\n"
-            "  - codegen (sequential codegen agents, executes ---actions--- blocks: write_file, run, append, delete, rename)\n"
+            "  - codegen (sequential or fanout codegen agents)\n"
+            "    For codegen stages, EACH agent SHOULD INCLUDE an 'actions' array:\n"
+            "      actions: [\n"
+            "        {\"action\": \"write_file\", \"file_path\": \"path/to/file.rs\",\n"
+            "         \"content\": \"...file content...\"},\n"
+            "        {\"action\": \"run\", \"command\": \"cd {project_dir} && cargo check\"}\n"
+            "      ]\n"
+            "    Set 'project_dir' (absolute path) for codegen stages.\n"
+            "    For multi-file projects, use MULTIPLE agents in one fanout stage -\n"
+            "    each agent writes different files in parallel.\n"
             "Available model tiers: cheap (info gathering), balanced (default drafting), quality (analysis/synthesis)\n"
             "Select the best-matching agent name from the library for the `role` field.\n"
             "If no exact match exists, use the closest one available.\n"

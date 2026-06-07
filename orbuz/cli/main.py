@@ -120,7 +120,7 @@ def main():
     run.add_argument("--resume", action="store_true",
                      help="Resume: load last workspace state and continue from where it left off")
     run.add_argument("--project-dir", default=None,
-                     help="Project directory hint (for code generation workflows)")
+                     help="Project directory (default: current working directory)")
     run.add_argument("--goal", default="",
                      help="Specific goal (overrides topic for targeted tasks)")
     run.add_argument("--language", default=None,
@@ -272,11 +272,19 @@ def _cmd_run(args):
     else:
         # 1. Orchestrator does Recon -> plan.json
         topic = args.goal or args.topic
+        project_dir = args.project_dir or os.getcwd()
         orch = Orchestrator(
             llm_client=llm,
             agent_dir=args.agent_dir,
         )
-        plan = orch.recon(topic=topic, workflow_name=args.workflow_name)
+        plan = orch.recon(topic=topic, workflow_name=args.workflow_name,
+                          project_dir=project_dir)
+
+        # Inject project_dir into codegen stages (from CLI arg, overrides LLM guess)
+        stages = plan.get('plan', {}).get('stages', [])
+        for stage in stages:
+            if stage.get('pattern') == 'codegen':
+                stage['project_dir'] = project_dir
 
         # 2. Display plan -> wait for user approval
         print_plan(plan)
