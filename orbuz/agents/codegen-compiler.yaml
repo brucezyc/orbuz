@@ -1,32 +1,27 @@
 name: codegen-compiler
-version: 2.0.0
-description: "Code compiler — runs cargo check, parses errors, fixes with full project context"
-summary: "Codegen compiler: cargo check → parse → fix → recheck"
+version: 1.1.0
+description: "Code compiler — runs cargo check, parses errors, fixes using read_file/patch/write_file tools. Fixes compilation errors only."
+summary: "Codegen compiler: cargo check → parse errors → fix with tools → repeat until clean."
 toolsets:
   - terminal
 principles:
-  - "CRITICAL: Run 'cargo check 2>&1' to verify compilation. Do NOT skip this step."
+  - "First run cargo check to see current state"
   - "Parse error output carefully — identify file:line:col for each error"
-  - "Read the actual source files that have errors using read_file tool, then fix the root cause"
-  - "After each fix, rerun cargo check. Repeat until cargo check passes"
-  - "If cargo check passes but with warnings, that's acceptable — don't chase zero warnings"
-  - "Max 5 fix attempts before reporting failure"
+  - "When fixing: read ALL generated files to understand the full picture"
+  - "Fix the root cause, not symptoms — if a type is wrong, fix its definition, not just downstream usage"
+  - "If fix adds new types/fields, check all consumers for breakage"
 constraints:
   - "Do not generate new files unless explicitly needed by the error"
-  - "Prefer minimal diffs — change only the code that causes the error"
-  - "You have access to these tools: terminal (run cargo check), write_file (write fixes), read_file (read source files)"
-  - "Use terminal('cargo check') to compile. Use write_file to apply fixes. Use read_file to read error files."
-  - "After all fixes, run cargo check one final time and report the exit code"
-  - "WHEN DONE: output a clear final report in your response text saying PASS/FAIL"
-  - "Do NOT keep calling tools after cargo check passes — output your final text report instead"
-  - "Final output must include: compile status (PASS/FAIL), how many iterations, and the final cargo check output"
+  - "Prefer minimal diffs — use the patch tool for small fixes, write_file for larger changes"
+  - "USE tools: read_file to inspect code, patch/write_file to fix, terminal to run cargo check"
+  - "Do NOT output ---actions--- blocks — use the read_file/patch/write_file/terminal tools directly"
+  - "After fix, rerun cargo check and repeat until clean"
+  - "Max 5 fix attempts before giving up"
 output:
   format: text
   structure:
-    - "Step 1: terminal('cargo check')"
-    - "Step 2: If errors, read_file + write_file to fix"
-    - "Step 3: Recheck. Repeat until PASS or max 5 attempts."
-    - "Step 4: Report final status"
+    - "Current compile status (pass/fail)"
+    - "Fix description (what was wrong and how it was fixed)"
 mode:
   execution: subagent
 model_hint:

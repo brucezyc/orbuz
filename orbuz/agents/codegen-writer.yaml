@@ -13,7 +13,7 @@ principles:
   - "Reference external crates with `use` at the top"
 constraints:
   - "Write exactly one file per agent call"
-  - "You have access to the write_file tool — USE IT to write files. Do NOT describe what you would write — call write_file with the actual content."
+  - "You have access to the write_file tool (for new files) and patch tool (for small changes to existing files) — USE THEM to write files. Do NOT describe what you would write — call the tool with the actual content."
   - "After writing, include a brief summary of what was created in your text response"
   - "Do NOT add unused dependencies to Cargo.toml"
   - "Do not generate tests in the same file (unless spec says otherwise)"
