@@ -38,6 +38,9 @@ Config file format:
 
 CLI flags always override config file values.
 
+    # Optional webhook URL for stage completion callbacks
+    webhook_url: "http://host:port/webhook/name"
+
 Codegen 子命令 (orbuz codegen):
     5 个独立模块，均可单独开关:
     --project-context on|off   扫描项目结构注入 LLM prompt
@@ -67,7 +70,8 @@ def load_config(path: str) -> dict:
 def _apply_config(args, cfg: dict):
     """Overlay config values onto args. CLI args (non-None) win."""
     # Global keys
-    for cli_attr, cfg_key in [("api_key", "api_key"), ("api_base", "api_base")]:
+    for cli_attr, cfg_key in [("api_key", "api_key"), ("api_base", "api_base"),
+                               ("webhook", "webhook_url")]:
         if cfg.get(cfg_key) and getattr(args, cli_attr, None) is None:
             setattr(args, cli_attr, cfg[cfg_key])
 
