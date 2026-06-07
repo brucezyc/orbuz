@@ -139,6 +139,53 @@ class WorkspaceManager:
         phase_dir.mkdir(parents=True, exist_ok=True)
         (phase_dir / f"{role}.md").write_text(content)
 
+    def write_agent_meta(self, run_id: str, stage_id: str, role: str, metadata: dict):
+        """Write agent metadata JSON alongside the .md output.
+
+        metadata fields: input_tokens, output_tokens, cost_usd,
+        duration_s, model_used, tier_used, success, error.
+        Appends to an array in {role}.meta.json for multi-round runs.
+        """
+        phase_dir = self.base / run_id / "phases" / stage_id
+        phase_dir.mkdir(parents=True, exist_ok=True)
+        meta_path = phase_dir / f"{role}.meta.json"
+        existing = []
+        if meta_path.exists():
+            try:
+                existing = json.loads(meta_path.read_text())
+                if not isinstance(existing, list):
+                    existing = [existing]
+            except (json.JSONDecodeError, Exception):
+                existing = []
+        existing.append(metadata)
+        meta_path.write_text(json.dumps(existing, ensure_ascii=False, indent=2))
+
+    def write_cost_summary(self, run_id: str, summary: dict):
+        """Write full cost tracker summary to run root as cost.json."""
+        path = self.base / run_id / "cost.json"
+        path.write_text(json.dumps(summary, ensure_ascii=False, indent=2))
+
+    def read_agent_meta(self, run_id: str, stage_id: str, role: str) -> list[dict]:
+        """Read agent metadata JSON. Returns list of round entries."""
+        path = self.base / run_id / "phases" / stage_id / f"{role}.meta.json"
+        if not path.exists():
+            return []
+        try:
+            data = json.loads(path.read_text())
+            return data if isinstance(data, list) else [data]
+        except (json.JSONDecodeError, Exception):
+            return []
+
+    def read_cost_summary(self, run_id: str) -> dict | None:
+        """Read full cost summary from run root."""
+        path = self.base / run_id / "cost.json"
+        if not path.exists():
+            return None
+        try:
+            return json.loads(path.read_text())
+        except (json.JSONDecodeError, Exception):
+            return None
+
     def read_output(self, run_id: str, stage_id: str, role: str) -> str:
         path = self.base / run_id / "phases" / stage_id / f"{role}.md"
         if path.exists():

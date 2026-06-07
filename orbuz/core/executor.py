@@ -113,6 +113,21 @@ class Executor:
 
     # ── Main entry ──
 
+    @staticmethod
+    def _agent_meta(result: DispatcherResult) -> dict:
+        """Build metadata dict from a DispatcherResult for logging."""
+        return {
+            "input_tokens": result.tokens // 2,
+            "output_tokens": result.tokens // 2,
+            "cost_usd": round(result.cost_usd, 6),
+            "duration_s": round(result.duration_s, 2),
+            "model_used": result.model_used,
+            "tier_used": result.tier_used,
+            "success": result.success,
+            "error": result.error[:200] if result.error else None,
+            "claims": len(result.claims),
+        }
+
     def run(self):
         """Generator: yields events."""
         # ── Plugin hook: before_workflow ──
@@ -218,6 +233,9 @@ class Executor:
             "cost_summary": cost_summary,
         })
 
+        # Persist cost summary to workspace
+        self.ws.write_cost_summary(run_id, cost_summary)
+
         yield {"type": "done", "run_id": run_id, "output_path": f"_workspace/{run_id}/deliver/",
                "cost_summary": cost_summary}
 
@@ -308,6 +326,8 @@ class Executor:
             self._cost_tracker.record_result(agent_def.name, result)
             self.ws.write_output(run_id, stage_id,
                                  f"{agent_def.name}", result.output)
+            self.ws.write_agent_meta(run_id, stage_id, agent_def.name,
+                                     self._agent_meta(result))
 
             if result.findings and result.findings.findings:
                 all_finding_sets.append(result.findings)
@@ -467,6 +487,8 @@ class Executor:
                     self.bus.publish(msg)
 
                 self.ws.write_output(run_id, stage_id, f"{role}_r{round_num}", result.output)
+                self.ws.write_agent_meta(run_id, stage_id, f"{role}_r{round_num}",
+                                         self._agent_meta(result))
 
             for role, result in round_results.items():
                 if role not in all_agent_results:
@@ -500,6 +522,8 @@ class Executor:
             )
             self._cost_tracker.record_result("merge-agent", merge_result)
             self.ws.write_output(run_id, stage_id, "merged", merge_result.output)
+            self.ws.write_agent_meta(run_id, stage_id, "merged",
+                                     self._agent_meta(merge_result))
             yield {"type": "progress", "stage": stage_id, "msg": "merge complete"}
 
         # Update summary
@@ -568,6 +592,8 @@ class Executor:
                 result = self.dispatcher.handle_failure(defn, agent_cfg["goal"],
                                                          prev_output, result, tier)
             self.ws.write_output(run_id, stage_id, agent_cfg["role"], result.output)
+            self.ws.write_agent_meta(run_id, stage_id, agent_cfg["role"],
+                                     self._agent_meta(result))
 
             yield {"type": "progress", "stage": stage_id, "agent": agent_cfg["role"]}
 
@@ -591,6 +617,8 @@ class Executor:
             p_result = self.dispatcher.run_agent(p_defn, producer["goal"], tier=p_tier)
             self._cost_tracker.record_result(producer["role"], p_result)
             self.ws.write_output(run_id, stage_id, f"{producer['role']}_v{cycle}", p_result.output)
+            self.ws.write_agent_meta(run_id, stage_id, f"{producer['role']}_v{cycle}",
+                                     self._agent_meta(p_result))
             yield {"type": "progress", "stage": stage_id, "cycle": cycle, "msg": "produced"}
 
             if reviewer:
@@ -632,6 +660,8 @@ class Executor:
                     defn = load_agent(sub_role)
                     sub_result = self.dispatcher.run_agent(defn, ac["goal"], context=context, tier=tier)
                     self.ws.write_output(run_id, stage_id, f"{role}_sub_{sub_role}", sub_result.output)
+                    self.ws.write_agent_meta(run_id, stage_id, f"{role}_sub_{sub_role}",
+                                             self._agent_meta(sub_result))
                     results.append((sub_role, sub_result))
             elif sub_pattern == "pipeline":
                 prev = ""
@@ -642,6 +672,8 @@ class Executor:
                                                           context=context + "\n" + prev if prev else context,
                                                           tier=tier)
                     self.ws.write_output(run_id, stage_id, f"{role}_sub_{sub_role}", sub_result.output)
+                    self.ws.write_agent_meta(run_id, stage_id, f"{role}_sub_{sub_role}",
+                                             self._agent_meta(sub_result))
                     results.append((sub_role, sub_result))
                     prev = sub_result.output
 
@@ -766,6 +798,8 @@ class Executor:
                     suffix = self._fanout_suffix.get(role, 0) + 1
                     self._fanout_suffix[role] = suffix
                     self.ws.write_output(run_id, stage_id, f"{role}_r{suffix}", result.output)
+                    self.ws.write_agent_meta(run_id, stage_id, f"{role}_r{suffix}",
+                                             self._agent_meta(result))
             yield {'type': 'progress', 'stage': stage_id,
                    'msg': f'  done: {sum(1 for r in all_results if r.get("exit_code",0)==0 or "path" in r)}/{len(all_results)} actions OK'}
         else:
@@ -824,6 +858,8 @@ class Executor:
                 )
                 self._cost_tracker.record_result(role, result)
                 self.ws.write_output(run_id, stage_id, role, result.output)
+                self.ws.write_agent_meta(run_id, stage_id, role,
+                                         self._agent_meta(result))
                 prev_output = result.output
 
         yield {'type': 'progress', 'stage': stage_id, 'msg': 'codegen complete'}
