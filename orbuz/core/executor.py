@@ -96,7 +96,8 @@ class Executor:
 
     MAX_ROUNDS = 3  # Multi-round fanout limit
 
-    def __init__(self, plan: dict, llm_client: LLMClient, run_id: str | None = None):
+    def __init__(self, plan: dict, llm_client: LLMClient, run_id: str | None = None,
+                 webhook_url: str | None = None):
         self.plan = plan
         self.dispatcher = Dispatcher(llm_client)
         self.ws = WorkspaceManager()
@@ -104,6 +105,7 @@ class Executor:
         self._decision = None
         self._cost_tracker = CostTracker()
         self.run_id = run_id
+        self.webhook_url = webhook_url
 
     # ── Main entry ──
 
@@ -176,6 +178,11 @@ class Executor:
 
             # Mark complete
             self.ws.set_stage_completed(run_id, stage_id)
+
+            # Webhook callback
+            if self.webhook_url:
+                summary = self.ws.get_stage_summary(run_id, stage_id)
+                self._call_webhook(run_id, stage_id, stage.get("name", ""), "completed", summary)
 
             # Checkpoint
             if idx < len(stages) - 1:
@@ -648,6 +655,31 @@ class Executor:
         if isinstance(data, dict) and data:
             return CommunicationSpec(data)
         return CommunicationSpec()
+
+    def _call_webhook(self, run_id: str, stage_id: str, stage_name: str,
+                      status: str, summary: dict | None = None):
+        """POST stage status to webhook URL. Uses urllib (stdlib, zero deps)."""
+        if not self.webhook_url:
+            return
+        try:
+            import urllib.request
+            payload = json.dumps({
+                "run_id": run_id,
+                "stage_id": stage_id,
+                "stage_name": stage_name,
+                "status": status,
+                "summary": summary or {},
+            }).encode()
+            req = urllib.request.Request(
+                self.webhook_url,
+                data=payload,
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            urllib.request.urlopen(req, timeout=10)
+        except Exception as e:
+            # Webhook is best-effort; don't block execution
+            print(f"  [webhook] {e}")
 
     def _handle_checkpoint_decision(self, run_id, decision):
         action = decision.get("action", "continue")

@@ -98,6 +98,8 @@ def main():
                      help="Balanced model ID (default: from DEFAULT_MODELS)")
     run.add_argument("--cheap-model", default=None,
                      help="Cheap model ID (default: from DEFAULT_MODELS)")
+    run.add_argument("--webhook", default=None,
+                     help="URL to POST stage completion callbacks (uses urllib, no deps)")
     run.add_argument("--api-key", default=None,
                      help="LLM API key (or set ANTHROPIC_API_KEY or DEEPSEEK_API_KEY env var)")
     run.add_argument("--api-base", default=None,
@@ -305,6 +307,7 @@ def _cmd_run(args):
     exe = Executor(
         plan=plan,
         llm_client=llm,
+        webhook_url=args.webhook,
     )
 
     if resume_run_id:
