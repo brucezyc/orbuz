@@ -299,6 +299,7 @@ class Dispatcher:
         total_out_tokens = 0
         total_cost = 0.0
         all_claims: list[dict] = []
+        all_output_parts: list[str] = []  # accumulate content from all rounds
         tool_calls_made = 0
 
         for round_num in range(max_tool_rounds):
@@ -330,12 +331,13 @@ class Dispatcher:
             if resp.content:
                 claims = self._extract_claims(resp.content, agent_def.name)
                 all_claims.extend(claims)
+                all_output_parts.append(resp.content)
 
             # If no tool calls, this is the final response
             if not resp.tool_calls:
                 return DispatcherResult(
                     success=True,
-                    output=resp.content or "",
+                    output="\n\n".join(all_output_parts) or "",
                     claims=all_claims,
                     tier_used=tier,
                     model_used=model_name,
@@ -374,7 +376,7 @@ class Dispatcher:
         # Exceeded max rounds — return whatever we have
         return DispatcherResult(
             success=True,
-            output="[Reached max tool rounds]",
+            output="\n\n".join(all_output_parts) or "[Reached max tool rounds]",
             claims=all_claims,
             tier_used=tier,
             model_used=model_name,
