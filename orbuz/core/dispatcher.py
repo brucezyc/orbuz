@@ -64,7 +64,8 @@ class DispatcherResult:
     def __init__(self, success: bool, output: str = "",
                  claims: list[dict] = None, tier_used: str = "",
                  model_used: str = "", duration_s: float = 0.0,
-                 tokens: int = 0, error: str = "",
+                 tokens: int = 0, input_tokens: int = 0, output_tokens: int = 0,
+                 error: str = "",
                  cost_usd: float = 0.0,
                  findings: FindingSet | None = None):
         self.success = success
@@ -74,6 +75,8 @@ class DispatcherResult:
         self.model_used = model_used
         self.duration_s = duration_s
         self.tokens = tokens
+        self.input_tokens = input_tokens or tokens
+        self.output_tokens = output_tokens or tokens
         self.error = error
         self.cost_usd = cost_usd
         self.findings = findings or FindingSet(persona="")
@@ -262,6 +265,8 @@ class Dispatcher:
                     tier_used=tier,
                     model_used=model_name,
                     tokens=total_in_tokens + total_out_tokens,
+                    input_tokens=total_in_tokens,
+                    output_tokens=total_out_tokens,
                     cost_usd=total_cost,
                 )
 
@@ -279,6 +284,8 @@ class Dispatcher:
                     tier_used=tier,
                     model_used=model_name,
                     tokens=total_in_tokens + total_out_tokens,
+                    input_tokens=total_in_tokens,
+                    output_tokens=total_out_tokens,
                     cost_usd=total_cost,
                 )
 
@@ -316,6 +323,8 @@ class Dispatcher:
             tier_used=tier,
             model_used=model_name,
             tokens=total_in_tokens + total_out_tokens,
+            input_tokens=total_in_tokens,
+            output_tokens=total_out_tokens,
             cost_usd=total_cost,
         )
 

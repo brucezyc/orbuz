@@ -61,7 +61,7 @@ class CostTracker:
 
     def record_result(self, agent_name: str, result: DispatcherResult):
         """Record from a DispatcherResult."""
-        self.record(agent_name, result.tokens // 2, result.tokens // 2,
+        self.record(agent_name, result.input_tokens, result.output_tokens,
                     result.cost_usd, result.duration_s, result.model_used)
 
     def summary(self) -> dict:
@@ -125,8 +125,8 @@ class Executor:
     def _agent_meta(result: DispatcherResult) -> dict:
         """Build metadata dict from a DispatcherResult for logging."""
         return {
-            "input_tokens": result.tokens // 2,
-            "output_tokens": result.tokens // 2,
+            "input_tokens": result.input_tokens,
+            "output_tokens": result.output_tokens,
             "cost_usd": round(result.cost_usd, 6),
             "duration_s": round(result.duration_s, 2),
             "model_used": result.model_used,
@@ -654,10 +654,10 @@ class Executor:
                 tools=TOOL_SCHEMAS if project_path else None,
                 project_path=str(project_path) if project_path else None,
             )
-            self._cost_tracker.record_result(agent_cfg["role"], result)
             if not result.success:
                 result = self.dispatcher.handle_failure(defn, agent_cfg["goal"],
                                                          prev_output, result, tier)
+            self._cost_tracker.record_result(agent_cfg["role"], result)
             self.ws.write_output(run_id, stage_id, agent_cfg["role"], result.output)
             self.ws.write_agent_meta(run_id, stage_id, agent_cfg["role"],
                                      self._agent_meta(result))
