@@ -100,6 +100,62 @@ class Dispatcher:
         self.llm = llm_client
         self.mcp = mcp_manager
 
+    @staticmethod
+    def _extract_text_tool_calls(text: str) -> list[dict]:
+        """Parse text-based tool calls (XML or JSON action blocks) from LLM output.
+        
+        Handles two formats:
+        1. XML: <tool_call name="read_file"><path>...</path></tool_call>
+        2. JSON: {"action": "read_file", "path": "..."} inside ```json blocks or bare
+        """
+        import re
+        results = []
+        if not text.strip():
+            return results
+        
+        # Format 1: XML tool_call blocks
+        xml_pattern = re.compile(
+            r'<tool_call\s+name=["\'](\w+)["\']>(.*?)</tool_call>',
+            re.DOTALL
+        )
+        for match in xml_pattern.finditer(text):
+            name = match.group(1)
+            inner = match.group(2).strip()
+            args = {}
+            # Parse inner XML params: <param>value</param> or <param_name>value</param_name>
+            for param_match in re.finditer(r'<(\w+)>(.*?)</\1>', inner, re.DOTALL):
+                args[param_match.group(1)] = param_match.group(2).strip()
+            results.append({"name": name, "args": args})
+        
+        # Format 1b: XML self-closing <read_file path="..."> or <terminal command="...">
+        self_close = re.compile(
+            r'<(\w+)\s+((?:\w+=["\'][^"\']*["\']\s*)+)\s*/?>',
+            re.DOTALL
+        )
+        for match in self_close.finditer(text):
+            name = match.group(1)
+            attrs = match.group(2)
+            args = {}
+            for attr_match in re.finditer(r'(\w+)=["\']([^"\']*)["\']', attrs):
+                args[attr_match.group(1)] = attr_match.group(2)
+            results.append({"name": name, "args": args})
+        
+        # Format 2: JSON action blocks
+        json_blocks = re.finditer(
+            r'(?:```json\s*)?\{\s*"action"\s*:\s*"(\w+)"\s*.*?\}(?:\s*```)?',
+            text, re.DOTALL
+        )
+        for match in json_blocks:
+            try:
+                data = json.loads(re.search(r'\{.*\}', match.group(), re.DOTALL).group())
+                name = data.pop("action", "")
+                if name:
+                    results.append({"name": name, "args": data})
+            except (json.JSONDecodeError, AttributeError):
+                pass
+        
+        return results
+
     def run_agent(self, agent_def: AgentDefinition, goal: str,
                   context: str = "", tier: str = "balanced",
                   messages_from_bus: str = "",
@@ -251,7 +307,6 @@ class Dispatcher:
                 system=system,
                 messages=messages,
                 tools=tools,
-                temperature=0.0 if tools else 0.5,
             )
 
             total_in_tokens += resp.input_tokens
