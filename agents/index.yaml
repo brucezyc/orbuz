@@ -223,3 +223,25 @@ agents:
     summary: "Synthesize research output into a readable report"
     tags: [report, synthesis, writing]
     file: synthesizer.yaml
+
+  # ── Code Generation ──
+
+  - name: codegen-planner
+    summary: "Codegen planner: goal → YAML spec with file list and cross-file types"
+    tags: [codegen, planning, architecture]
+    file: codegen-planner.yaml
+
+  - name: codegen-writer
+    summary: "Codegen writer: one file per agent, given spec context"
+    tags: [codegen, writing, rust]
+    file: codegen-writer.yaml
+
+  - name: codegen-compiler
+    summary: "Codegen compiler: cargo check → parse → fix with project context"
+    tags: [codegen, compile, fix, rust]
+    file: codegen-compiler.yaml
+
+  - name: codegen-reporter
+    summary: "Codegen reporter: summary of generated files, compile status, and next steps"
+    tags: [codegen, report, summary]
+    file: codegen-reporter.yaml

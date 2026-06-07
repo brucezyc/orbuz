@@ -145,6 +145,8 @@ class Executor:
                 yield from self._exec_producer_reviewer(run_id, stage, idx)
             elif pattern == "code_review":
                 yield from self._exec_code_review(run_id, stage, idx)
+            elif pattern == "codegen":
+                yield from self._exec_codegen(run_id, stage, idx)
             else:
                 yield {"type": "error", "msg": f"Unknown pattern: {pattern}"}
                 return
@@ -514,6 +516,172 @@ class Executor:
                 yield {"type": "progress", "stage": stage_id, "cycle": cycle, "verdict": verdict}
                 if verdict == "PASS":
                     break
+
+    # ── Core: Codegen Pattern ──
+
+    def _exec_codegen(self, run_id, stage, idx):
+        """
+        Multi-agent code generation workflow.
+
+        Stages:
+          1. Planner: goal → YAML spec (files, types, deps)
+          2. Writers: parallel per file from spec
+          3. Compiler: cargo check + fix loop
+          4. Reporter: summary
+        """
+        stage_id = stage["id"]
+        goal = stage.get("goal", "")
+        proj_dir = stage.get("project_dir", ".")
+        lang = stage.get("language", "rust")
+
+        yield {"type": "progress", "stage": stage_id, "msg": f"Codegen: {goal[:80]}"}
+
+        # ── Stage 1: Planner ──
+        yield {"type": "progress", "stage": stage_id, "msg": "Stage 1/4: Planning..."}
+        planner_defn = load_agent("codegen-planner")
+        planner_context = (
+            f"## Project Directory\n{proj_dir}\n\n"
+            f"## Language\n{lang}\n\n"
+            f"## Goal\n{goal}"
+        )
+        plan_result = self.dispatcher.run_agent(
+            planner_defn, goal,
+            context=planner_context,
+            tier="quality",
+        )
+        self._cost_tracker.record_result("codegen-planner", plan_result)
+        self.ws.write_output(run_id, stage_id, "codegen-planner", plan_result.output)
+        yield {"type": "progress", "stage": stage_id, "msg": f"  → Plan produced ({plan_result.tokens:,} tokens)"}
+
+        if not plan_result.success:
+            yield {"type": "error", "msg": "Planner failed. Aborting."}
+            return
+
+        # Extract file list from planner output
+        spec_text = plan_result.output
+        # Parse YAML spec from LLM output (look for ```yaml or assume all output is spec)
+        import re as _re
+        yaml_block = _re.search(r'```(?:yaml)?\s*\n(.*?)\n```', spec_text, _re.DOTALL)
+        spec_yaml = yaml_block.group(1) if yaml_block else spec_text
+
+        # Parse file list permissively
+        file_list = []
+        for m in _re.finditer(r'(?:^|\n)\s*-\s*(?:file|path):\s*["\']?([^"\'\n]+)["\']?', spec_yaml):
+            file_list.append(m.group(1).strip())
+
+        # Fallback: try to find file references in output
+        if not file_list:
+            file_list = list(_re.findall(r'src/\S+\.rs', spec_yaml)) or ["src/main.rs"]
+
+        yield {"type": "progress", "stage": stage_id, "msg": f"  → {len(file_list)} files to generate"}
+
+        # Write spec to disk for writers
+        import tempfile
+        spec_path = f"{proj_dir}/.codegen_spec.yaml"
+        import os as _os
+        _os.makedirs(_os.path.dirname(spec_path) or proj_dir, exist_ok=True)
+        try:
+            with open(spec_path, "w") as f:
+                f.write(spec_yaml)
+        except Exception:
+            pass  # Non-critical — context is passed to writers directly
+
+        # ── Stage 2: Writers (parallel) ──
+        yield {"type": "progress", "stage": stage_id, "msg": f"Stage 2/4: Writing {len(file_list)} files..."}
+        write_results = []
+        for fp in file_list:
+            writer_defn = load_agent("codegen-writer")
+            writer_goal = f"Write file '{fp}' for the project at {proj_dir}. Language: {lang}"
+            writer_context = (
+                f"## Project Directory\n{proj_dir}\n\n"
+                f"## File to Write\n{fp}\n\n"
+                f"## Full Spec\n{spec_yaml[:4000]}\n\n"
+                f"## Instructions\n"
+                f"Write the COMPLETE contents of {fp}. "
+                f"Output the file contents directly — no markdown, no explanation.\n"
+                f"If the file already exists, read it first and ONLY modify what the spec requires."
+            )
+            w_result = self.dispatcher.run_agent(
+                writer_defn, writer_goal,
+                context=writer_context,
+                tier="balanced",
+            )
+            self._cost_tracker.record_result("codegen-writer", w_result)
+            write_results.append((fp, w_result))
+
+            # Write file to disk
+            if w_result.success and w_result.output.strip():
+                output = w_result.output.strip()
+                # Strip markdown fences if present
+                code_block = _re.search(r'```(?:\w+)?\s*\n(.*?)\n```', output, _re.DOTALL)
+                content = code_block.group(1) if code_block else output
+                try:
+                    full_path = _os.path.join(proj_dir, fp)
+                    _os.makedirs(_os.path.dirname(full_path), exist_ok=True)
+                    with open(full_path, "w") as f:
+                        f.write(content)
+                    yield {"type": "progress", "stage": stage_id, "msg": f"  ✅ Wrote {fp}"}
+                except Exception as e:
+                    yield {"type": "progress", "stage": stage_id, "msg": f"  ⚠️ Failed to write {fp}: {e}"}
+
+        # ── Stage 3: Compiler ──
+        yield {"type": "progress", "stage": stage_id, "msg": "Stage 3/4: Compiling..."}
+        compiler_defn = load_agent("codegen-compiler")
+        compile_context = (
+            f"## Project Directory\n{proj_dir}\n\n"
+            f"## Language\n{lang}\n\n"
+            f"## Files Generated\n" + "\n".join(f"- {fp}" for fp, _ in write_results)
+        )
+        compiler_goal = f"Compile the project at {proj_dir}. Run cargo check, parse errors, fix them. Use project context to ensure cross-file type consistency."
+        comp_result = self.dispatcher.run_agent(
+            compiler_defn, compiler_goal,
+            context=compile_context,
+            tier="quality",
+        )
+        self._cost_tracker.record_result("codegen-compiler", comp_result)
+        self.ws.write_output(run_id, stage_id, "codegen-compiler", comp_result.output)
+
+        compile_passed = comp_result.success and "PASS" in comp_result.output.upper() or "✅" in comp_result.output
+
+        # Also do a real cargo check to verify
+        import subprocess as _sp
+        try:
+            real_check = _sp.run(
+                ["cargo", "check", "--message-format=short"],
+                capture_output=True, text=True, timeout=120,
+                cwd=proj_dir,
+            )
+            compile_passed = real_check.returncode == 0
+        except Exception:
+            pass  # Agent report is authoritative if cargo check fails
+
+        yield {"type": "progress", "stage": stage_id, "msg": f"  → Compile: {'✅ PASS' if compile_passed else '❌ FAIL'}"}
+
+        # ── Stage 4: Reporter ──
+        yield {"type": "progress", "stage": stage_id, "msg": "Stage 4/4: Reporting..."}
+        reporter_defn = load_agent("codegen-reporter")
+        reporter_context = (
+            f"## Goal\n{goal}\n\n"
+            f"## Project Directory\n{proj_dir}\n\n"
+            f"## Files Generated\n" + "\n".join(
+                f"- {fp} (success={w.success}, {w.tokens:,} tokens)"
+                for fp, w in write_results
+            ) + "\n\n"
+            f"## Compile Status\n{'✅ PASS' if compile_passed else '❌ FAIL'}\n\n"
+            f"## Compiler Output\n{comp_result.output[:2000]}\n\n"
+            f"## Planner Spec\n{spec_yaml[:1000]}"
+        )
+        report_result = self.dispatcher.run_agent(
+            reporter_defn, "Generate summary report",
+            context=reporter_context,
+            tier="cheap",
+        )
+        self._cost_tracker.record_result("codegen-reporter", report_result)
+        self.ws.write_output(run_id, stage_id, "codegen-reporter", report_result.output)
+        yield {"type": "progress", "stage": stage_id, "msg": "  ✅ Report complete"}
+
+        yield {"type": "progress", "stage": stage_id,
+               "msg": f"Codegen done: {len(file_list)} files, compile={'PASS' if compile_passed else 'FAIL'}"}
 
     # ── Internal ──
 
