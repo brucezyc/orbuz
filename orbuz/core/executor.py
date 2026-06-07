@@ -656,7 +656,9 @@ class Executor:
             )
             if not result.success:
                 result = self.dispatcher.handle_failure(defn, agent_cfg["goal"],
-                                                         prev_output, result, tier)
+                                                         prev_output, result, tier,
+                                                         tools=TOOL_SCHEMAS if project_path else None,
+                                                         project_path=str(project_path) if project_path else None)
             self._cost_tracker.record_result(agent_cfg["role"], result)
             self.ws.write_output(run_id, stage_id, agent_cfg["role"], result.output)
             self.ws.write_agent_meta(run_id, stage_id, agent_cfg["role"],

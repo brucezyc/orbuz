@@ -393,7 +393,9 @@ class Dispatcher:
 
     def handle_failure(self, agent_def: AgentDefinition, goal: str,
                        context: str, prev_result: DispatcherResult,
-                       failed_tier: str = "") -> DispatcherResult:
+                       failed_tier: str = "",
+                       tools: list[dict] | None = None,
+                       project_path: str | None = None) -> DispatcherResult:
         """
         Escalation chain:
           1. Retry at a higher tier (e.g., cheap→balanced→quality)
@@ -410,7 +412,14 @@ class Dispatcher:
             retry_context = context + (
                 f"\n\nNote: Previously failed at {failed} tier, error: {prev_result.error}"
             )
-            result = self.run_agent(agent_def, goal, retry_context, tier=fallback)
+            if tools and project_path:
+                from orbuz.codegen.tools import TOOL_SCHEMAS
+                result = self.run_agent_with_tools(
+                    agent_def, goal, retry_context, tier=fallback,
+                    tools=TOOL_SCHEMAS, project_path=project_path,
+                )
+            else:
+                result = self.run_agent(agent_def, goal, retry_context, tier=fallback)
             if result.success:
                 return result
 
