@@ -150,19 +150,20 @@ class Orchestrator:
             "  - producer_reviewer (produce -> review -> cycle)\n"
             "  - codegen (agents write files via 'actions' array)\n"
             "### Codegen Pattern Details\n"
-            "For codegen stages, EACH agent MUST include an 'actions' array:\n"
-            "  actions: [\n"
-            '    {"action": "write_file", "file_path": "src/main.rs",\n'
-            '     "content": "fn main() { println!(\\\"hello\\\"); }"},\n'
-            '    {"action": "run", "command": "cd {project_dir} && cargo check"}\n'
-            "  ]\n"
-            "CRITICAL: The 'content' field in write_file actions MUST contain the FULL FILE CONTENTS (actual code), "
-            "NOT a description or summary. Write the complete source code that would compile and work. "
-            "File paths are RELATIVE to the project_dir.\n"
-            "Set 'project_dir' (absolute path) for codegen stages.\n"
-            "IMPORTANT: For 'codegen-compiler' agents, do NOT include pre-built 'actions' — "
-            "let the compiler agent run its own checks and output ---actions--- blocks to fix errors. "
-            "For codegen-compiler, use pattern: 'pipeline' instead of 'codegen'.\n"
+            "For codegen stages, you have TWO approaches:\n"
+            "  Approach A (SIMPLE/BRIEF content — use manifest actions):\n"
+            '    {"action": "write_file", "file_path": "Cargo.toml",\n'
+            '     "content": "full file content here..."}\n'
+            "    Only use this for VERY SHORT files (under 20 lines).\n\n"
+            "  Approach B (LARGE files — use dispatch, no manifest actions):\n"
+            '    Omit the "actions" field entirely. The codegen-writer agent will generate\n'
+            "    the file via LLM and output ---actions--- blocks. This is the DEFAULT for\n"
+            "    files over 20 lines.\n\n"
+            "CRITICAL: The 'content' field in write_file actions MUST contain FULL FILE "
+            "CONTENTS (actual code), NOT a description. File paths are RELATIVE to project_dir.\n"
+            "IMPORTANT: For 'codegen-compiler' agents, always omit pre-built actions — "
+            "let the compiler agent run checks and output ---actions--- blocks with fixes. "
+            "Use pattern: 'pipeline' for compiler stages.\n"
             "### Parallel Codegen (Fanout)\n"
             "For multi-file projects with INDEPENDENT files:\n"
             "  - Use pattern: 'codegen', set 'fanout: true'\n"
