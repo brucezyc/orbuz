@@ -387,16 +387,11 @@ class Dispatcher:
         # Tool-use directive — inject if agent has toolsets
         if agent_def.toolsets:
             parts.append(
-                "\n## Tools Available"
-                "\nYou have access to the following tools via function calling:"
-                "\n- write_file(path, content): Write a new file"
-                "\n- terminal(command): Run a shell command"
-                "\n- read_file(path, offset, limit): Read a file with line numbers"
-                "\n- patch(path, old_string, new_string): Targeted find-and-replace edit"
-                "\n- search_files(pattern, target, path, file_glob): Search codebase"
-                "\nCRITICAL: You MUST use these tools to do your work."
-                "\nDo NOT describe what you would do — call the tool with the actual content."
-                "\nEvery response should either (a) call a tool, or (b) deliver the final result."
+                "\n## Function Calling"
+                "\nYou have access to tools. Use function calling to call them."
+                "\nDo NOT describe actions in text — call the function."
+                "\nEVERY response must be EITHER a function call OR final output."
+                "\nIf you can make progress by calling a function, do it."
             )
 
         if agent_def.output.structure:
