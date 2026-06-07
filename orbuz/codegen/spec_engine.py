@@ -149,10 +149,11 @@ class SpecEngine:
             for f in action.files:
                 all_files_set.add(f)
 
-            # 根据 action 类型推导额外的文件
-            inferred = self._infer_files(action)
-            for f in inferred:
-                all_files_set.add(f)
+            # 根据 action 类型推导额外的文件（仅在 action 未显式指定 files 时）
+            if not action.files:
+                inferred = self._infer_files(action)
+                for f in inferred:
+                    all_files_set.add(f)
 
         plan.all_files = sorted(all_files_set)
 

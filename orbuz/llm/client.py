@@ -151,7 +151,10 @@ class LLMClient:
         # Set tier -> model mapping
         self.tier_models: dict[str, str] = {}
         if models:
-            self.tier_models.update(models)
+            # Filter out None values so defaults still apply
+            for k, v in models.items():
+                if v is not None:
+                    self.tier_models[k] = v
         for tier in self.TIERS:
             if tier not in self.tier_models:
                 default = DEFAULT_MODELS.get(tier, "")
