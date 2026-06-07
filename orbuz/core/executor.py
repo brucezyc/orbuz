@@ -723,7 +723,8 @@ class Executor:
             all_results = []
             for agent_cfg in agents_cfg:
                 role = agent_cfg['role']
-                if 'actions' in agent_cfg:
+                # Bypass manifest actions for codegen-writers — forces LLM to write real code
+                if 'actions' in agent_cfg and 'codegen-writer' not in role:
                     # Manifest actions - execute immediately
                     yield {'type': 'progress', 'stage': stage_id,
                            'msg': f'  {role}: {len(agent_cfg["actions"])} manifest actions'}
@@ -743,7 +744,8 @@ class Executor:
                 role = agent_cfg['role']
 
                 # Mode 1: Manifest actions (pre-built by Orchestrator, no LLM call)
-                if 'actions' in agent_cfg:
+                # Bypass for codegen-writers — forces LLM to write real code
+                if 'actions' in agent_cfg and 'codegen-writer' not in role:
                     yield {'type': 'progress', 'stage': stage_id,
                            'msg': f'  executing {len(agent_cfg["actions"])} manifest actions...'}
                     results = self._exec_manifest_actions(
