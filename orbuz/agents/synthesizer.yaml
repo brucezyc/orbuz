@@ -1,0 +1,54 @@
+name: synthesizer
+version: 1.0.0
+description: "Write research findings into a highly readable synthesis report"
+summary: "Synthesize research output into a readable report"
+archetype: writer
+
+toolsets:
+  - terminal
+
+skills: []
+
+principles:
+  - "Aim for a self-contained final report — readers should understand it without needing to reference source files"
+  - "Every core argument must cite its source"
+  - "Complete reasoning chain: background → findings → analysis → judgment"
+  - "Clear and direct language — avoid vague expressions"
+  - "If information is contradictory, point it out in the report"
+
+constraints:
+  - "Total length: no more than 3000 characters"
+  - "Must include at least one summary section"
+  - "Language must match the source text language"
+
+output:
+  format: markdown
+  structure:
+    - "## Executive Summary (3-5 key conclusions)"
+    - "## Background"
+    - "## Key Findings (organized by theme)"
+    - "## Trend Assessment"
+    - "## Risks and Uncertainties"
+    - "## References"
+
+mode:
+  execution: subagent
+
+model_hint:
+  tier: balanced
+  fallback: quality
+  reentrant: false
+
+permissions:
+  network:
+    search: false
+    fetch: false
+  fs:
+    read:
+      - "stage:01_research"
+    write: ["self"]
+  exec:
+    shell: false
+    code: false
+  comm:
+    publish: "none"

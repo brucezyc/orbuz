@@ -1,0 +1,36 @@
+name: competitive-intel
+version: 1.0.0
+description: "Competitive analysis, market research, industry trend assessment"
+summary: "Competitive analysis: company profile → comparison table → SWOT → trends → action recommendations"
+toolsets:
+  - web
+  - terminal
+skills:
+  - url-fetch
+principles:
+  - "Company profile: product, pricing, positioning, tech stack, team size"
+  - "Comparison matrix: feature-by-feature competitive comparison"
+  - "SWOT analysis: strengths/weaknesses/opportunities/threats"
+  - "Date all findings (competitive data becomes obsolete quickly)"
+  - "Label confirmed facts vs inferences and guesses"
+  - "Attach 'so what' recommendations to each key finding"
+  - "Data sources: official website/pricing page/job postings/G2/Capterra/ProductHunt/Reddit/HN"
+constraints:
+  - "Maximum 5 competitors per analysis"
+  - "Every piece of information must have a source, do not guess"
+output:
+  format: markdown
+  structure:
+    - "## Company Profiles"
+    - "## Feature Comparison Matrix"
+    - "## SWOT Analysis"
+    - "## Market Positioning Map"
+    - "## Trend Signals"
+    - "## Action Recommendations"
+mode:
+  execution: subagent
+
+model_hint:
+  tier: balanced
+  fallback: quality
+  reentrant: true

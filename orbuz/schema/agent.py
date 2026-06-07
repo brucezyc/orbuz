@@ -138,11 +138,21 @@ class AgentIndex(BaseModel):
     agents: list[IndexEntry]
 
 
+def _builtin_agent_dir() -> Path:
+    """返回内置 agent 目录（随 orbuz 包安装）。"""
+    return Path(__file__).parent.parent / "agents"
+
+
 def load_agent(name: str, agent_dir: str | Path | None = None) -> AgentDefinition:
     """Load an agent definition from agents/{name}.yaml"""
-    base = Path(agent_dir) if agent_dir else Path.cwd() / "agents"
+    base = Path(agent_dir) if agent_dir else _builtin_agent_dir()
     path = base / f"{name}.yaml"
     if not path.exists():
+        # Fallback: try built-in agents
+        builtin = _builtin_agent_dir() / f"{name}.yaml"
+        if builtin.exists():
+            data = yaml.safe_load(builtin.read_text())
+            return AgentDefinition(**data)
         return AgentDefinition(name=name, description=f"Agent '{name}' (definition file not found)")
     data = yaml.safe_load(path.read_text())
     return AgentDefinition(**data)
@@ -150,9 +160,14 @@ def load_agent(name: str, agent_dir: str | Path | None = None) -> AgentDefinitio
 
 def load_index(agent_dir: str | Path | None = None) -> AgentIndex:
     """Load the index from agents/index.yaml"""
-    base = Path(agent_dir) if agent_dir else Path.cwd() / "agents"
+    base = Path(agent_dir) if agent_dir else _builtin_agent_dir()
+    # Try specified dir first, then built-in
     path = base / "index.yaml"
     if not path.exists():
+        builtin_path = _builtin_agent_dir() / "index.yaml"
+        if builtin_path.exists():
+            data = yaml.safe_load(builtin_path.read_text())
+            return AgentIndex(**data)
         return AgentIndex(agents=[])
     data = yaml.safe_load(path.read_text())
     return AgentIndex(**data)

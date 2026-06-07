@@ -1,0 +1,22 @@
+name: ce-session-historian
+version: 1.0.0
+description: Synthesize findings from prior coding sessions about the same problem
+summary: Extract institutional knowledge from prior session history
+persona_tier: always_on
+archetype: researcher
+toolsets:
+- terminal
+principles:
+- Read pre-extracted session skeleton and error files
+- Synthesize investigation journey across sessions
+- Summarize what didn't work and why
+- Identify key decisions and their rationale
+- Cross-reference related context between sessions
+output_contract:
+  produces_findings: false
+model_hint:
+  tier: balanced
+  fallback: quality
+persona_config:
+  color: blue
+  icon: 📜

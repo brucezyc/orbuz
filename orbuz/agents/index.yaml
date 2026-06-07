@@ -1,0 +1,247 @@
+# Agent Registry Index
+# Orchestrator uses summary, tags, and persona_tier for matching decisions
+# Update this file when adding new agents
+
+agents:
+  # ── Research / Analysis ──
+
+  - name: deep-researcher
+    summary: "General multi-step research: decompose question → multi-angle search → cross-validate → synthesize report"
+    tags: [research, web-search, synthesis, general]
+    file: deep-researcher.yaml
+
+  - name: official-researcher
+    summary: "Search official/regulatory/corporate announcements only, prefer primary sources"
+    tags: [search, policy, official, government]
+    file: official-researcher.yaml
+
+  - name: media-researcher
+    summary: "Search media/investment bank/market commentary, multi-source cross-verification"
+    tags: [search, media, market, news]
+    file: media-researcher.yaml
+
+  - name: background-researcher
+    summary: "Search technical/competitive/academic background, signals of landscape change"
+    tags: [search, technology, academic, background]
+    file: background-researcher.yaml
+
+  - name: fact-checker
+    summary: "Fact-checking: extract claims → multi-source verify → rate each (Verified/Partially True/Misleading/False)"
+    tags: [verification, fact-check, accuracy]
+    file: fact-checker.yaml
+
+  - name: competitive-intel
+    summary: "Competitive analysis: company profile → comparison table → SWOT → trends → action recommendations"
+    tags: [competitive-analysis, market-research, industry]
+    file: competitive-intel.yaml
+    persona_tier: cross_cutting
+
+  - name: paper-analyst
+    summary: "Academic paper analysis: methods → results → innovations → limitations → reproducibility suggestions"
+    tags: [academic, paper, literature-review]
+    file: paper-analyst.yaml
+    persona_tier: cross_cutting
+
+  # ── Code Review (Compound Engineering-style) ──
+
+  - name: ce-correctness-reviewer
+    summary: "Logic errors, edge cases, state bugs, error propagation, intent compliance"
+    tags: [code-review, correctness, logic, bugs]
+    file: ce-correctness-reviewer.yaml
+    persona_tier: always_on
+    archetype: reviewer
+
+  - name: ce-testing-reviewer
+    summary: "Coverage gaps, weak assertions, brittle tests, missing edge case tests"
+    tags: [code-review, testing, coverage, quality]
+    file: ce-testing-reviewer.yaml
+    persona_tier: always_on
+    archetype: reviewer
+
+  - name: ce-maintainability-reviewer
+    summary: "Structural quality, complexity deletion, coupling, type-boundary leaks, dead code"
+    tags: [code-review, maintainability, complexity, coupling]
+    file: ce-maintainability-reviewer.yaml
+    persona_tier: always_on
+    archetype: reviewer
+
+  - name: ce-project-standards-reviewer
+    summary: "AGENTS.md and CLAUDE.md compliance, frontmatter, naming, cross-platform portability"
+    tags: [code-review, standards, conventions]
+    file: ce-project-standards-reviewer.yaml
+    persona_tier: always_on
+    archetype: reviewer
+
+  - name: ce-agent-native-reviewer
+    summary: "Verify new features are agent-accessible — tools, prompts, system context"
+    tags: [code-review, agent-native, accessibility]
+    file: ce-agent-native-reviewer.yaml
+    persona_tier: always_on
+    archetype: reviewer
+
+  - name: ce-learnings-researcher
+    summary: "Search docs/solutions/ for past issues related to this PR's modules and patterns"
+    tags: [code-review, research, learnings]
+    file: ce-learnings-researcher.yaml
+    persona_tier: always_on
+    archetype: researcher
+
+  - name: ce-code-simplicity-reviewer
+    summary: "Simplicity review: flag over-engineering, unnecessary abstraction, complexity"
+    tags: [code-review, simplicity, yagni]
+    file: ce-code-simplicity-reviewer.yaml
+    persona_tier: always_on
+    archetype: reviewer
+
+  - name: ce-session-historian
+    summary: "Extract institutional knowledge from prior session history"
+    tags: [research, history, synthesis]
+    file: ce-session-historian.yaml
+    persona_tier: always_on
+    archetype: researcher
+
+  - name: ce-security-reviewer
+    summary: "Auth, public endpoints, user input, permissions, secrets management"
+    tags: [code-review, security, auth, injection]
+    file: ce-security-reviewer.yaml
+    persona_tier: cross_cutting
+    archetype: reviewer
+
+  - name: ce-performance-reviewer
+    summary: "Database queries, ORM calls, data transforms, caching, async/concurrent code"
+    tags: [code-review, performance, optimization]
+    file: ce-performance-reviewer.yaml
+    persona_tier: cross_cutting
+    archetype: reviewer
+
+  - name: ce-api-contract-reviewer
+    summary: "Routes, serializers, type signatures, versioning, event schemas"
+    tags: [code-review, api, contract, schema]
+    file: ce-api-contract-reviewer.yaml
+    persona_tier: cross_cutting
+    archetype: reviewer
+
+  - name: ce-data-migration-reviewer
+    summary: "Migration files, schema dumps, backfill scripts, data transformations"
+    tags: [code-review, migration, database, schema]
+    file: ce-data-migration-reviewer.yaml
+    persona_tier: cross_cutting
+    archetype: reviewer
+
+  - name: ce-reliability-reviewer
+    summary: "Error handling, retry logic, circuit breakers, timeouts, background jobs"
+    tags: [code-review, reliability, error-handling]
+    file: ce-reliability-reviewer.yaml
+    persona_tier: cross_cutting
+    archetype: reviewer
+
+  - name: ce-adversarial-reviewer
+    summary: "Chaos engineering: construct failure scenarios, cascades, and abuse cases"
+    tags: [code-review, adversarial, security, chaos]
+    file: ce-adversarial-reviewer.yaml
+    persona_tier: cross_cutting
+    archetype: reviewer
+
+  - name: ce-previous-comments-reviewer
+    summary: "Track whether prior review comments and threads are resolved"
+    tags: [code-review, comments, feedback]
+    file: ce-previous-comments-reviewer.yaml
+    persona_tier: cross_cutting
+    archetype: reviewer
+
+  - name: ce-architecture-strategist
+    summary: "Architecture analysis: pattern compliance, SOLID, coupling, design integrity"
+    tags: [code-review, architecture, design, SOLID]
+    file: ce-architecture-strategist.yaml
+    persona_tier: cross_cutting
+    archetype: reviewer
+
+  - name: ce-swift-ios-reviewer
+    summary: "Swift files, SwiftUI, UIKit, entitlements, Core Data, SPM"
+    tags: [code-review, swift, ios, mobile]
+    file: ce-swift-ios-reviewer.yaml
+    persona_tier: stack_specific
+    archetype: reviewer
+
+  - name: ce-deployment-verification-agent
+    summary: "Go/No-Go deployment checklist with SQL verification queries and rollback procedures"
+    tags: [code-review, deployment, migration, verification]
+    file: ce-deployment-verification-agent.yaml
+    persona_tier: ce_conditional
+    archetype: reviewer
+
+  # ── Original orbuz agents ──
+
+  - name: code-reviewer
+    summary: "Code review: line-by-line check for bugs/security/performance/style/architecture, with fix suggestions and severity"
+    tags: [code-review, quality, security, pr]
+    file: code-reviewer.yaml
+    persona_tier: always_on
+    archetype: reviewer
+
+  - name: test-writer
+    summary: "Test writing: generate unit/integration tests from code logic, covering edge cases and error paths"
+    tags: [testing, quality, unit-test]
+    file: test-writer.yaml
+
+  - name: debugger
+    summary: "System debugging: analyze errors → root cause → fix recommendations → validation plan"
+    tags: [debugging, bug-fix, troubleshooting]
+    file: debugger.yaml
+
+  - name: documentation-writer
+    summary: "Technical documentation: extract structure from code/API → write clear docs → include examples and usage instructions"
+    tags: [documentation, writing, technical]
+    file: documentation-writer.yaml
+
+  - name: security-auditor
+    summary: "Security audit: OWASP Top 10 checks for injection/XSS/auth/key leaks/misconfigurations"
+    tags: [security, audit, vulnerability]
+    file: security-auditor.yaml
+
+  - name: writer
+    summary: "Long-form writing: research → outline → draft → revision, adapting tone and audience"
+    tags: [writing, content, article, blog]
+    file: writer.yaml
+
+  - name: editor
+    summary: "Content editing: hierarchical review of structure → content → wording → grammar → typos, preserving author's voice"
+    tags: [editing, proofreading, style, grammar]
+    file: editor.yaml
+
+  - name: data-analyst
+    summary: "Data analysis: understand data → exploratory analysis → visualization → key findings report"
+    tags: [data, analysis, statistics, sql]
+    file: data-analyst.yaml
+
+  - name: merge-agent
+    summary: "Merge multiple independent outputs, find commonalities/contradictions/gaps"
+    tags: [merge, synthesis, combine]
+    file: merge-agent.yaml
+
+  - name: synthesizer
+    summary: "Synthesize research output into a readable report"
+    tags: [report, synthesis, writing]
+    file: synthesizer.yaml
+
+  # ── Code Generation ──
+
+  - name: codegen-planner
+    summary: "Codegen planner: goal → YAML spec with file list and cross-file types"
+    tags: [codegen, planning, architecture]
+    file: codegen-planner.yaml
+
+  - name: codegen-writer
+    summary: "Codegen writer: one file per agent, given spec context"
+    tags: [codegen, writing, rust]
+    file: codegen-writer.yaml
+
+  - name: codegen-compiler
+    summary: "Codegen compiler: cargo check → parse → fix with project context"
+    tags: [codegen, compile, fix, rust]
+    file: codegen-compiler.yaml
+
+  - name: codegen-reporter
+    summary: "Codegen reporter: summary of generated files, compile status, and next steps"
+    tags: [codegen, report, summary]
+    file: codegen-reporter.yaml

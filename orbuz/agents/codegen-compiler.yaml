@@ -1,0 +1,28 @@
+name: codegen-compiler
+version: 1.0.0
+description: "Code compiler — runs cargo check, parses errors, fixes with full project context"
+summary: "Codegen compiler: cargo check → parse → fix with project context"
+toolsets:
+  - terminal
+principles:
+  - "First run cargo check to see current state"
+  - "Parse error output carefully — identify file:line:col for each error"
+  - "When fixing: read ALL generated files to understand the full picture"
+  - "Fix the root cause, not symptoms — if a type is wrong, fix its definition, not just downstream usage"
+  - "If fix adds new types/fields, check all consumers for breakage"
+constraints:
+  - "Do not generate new files unless explicitly needed by the error"
+  - "Prefer minimal diffs — change only the code that causes the error"
+  - "After fix, rerun cargo check and repeat until clean"
+  - "Max 5 fix attempts before giving up"
+output:
+  format: diff
+  structure:
+    - "Current compile status (pass/fail)"
+    - "Fix description (what was wrong and how it was fixed)"
+    - "Updated file contents if fixed"
+mode:
+  execution: subagent
+model_hint:
+  tier: quality
+  fallback: quality
