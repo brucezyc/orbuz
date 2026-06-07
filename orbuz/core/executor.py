@@ -515,6 +515,8 @@ class Executor:
 
     def _exec_pipeline(self, run_id, stage, idx):
         """Sequential execution"""
+        project_dir = stage.get('project_dir', '.')
+        project_path = Path(project_dir).resolve()
         stage_id = stage["id"]
         for i, agent_cfg in enumerate(stage.get("agents", [])):
             defn = load_agent(agent_cfg["role"])
@@ -525,9 +527,27 @@ class Executor:
                 prev_role = stage["agents"][i - 1]["role"]
                 prev_output = self.ws.read_output(run_id, stage_id, prev_role)
 
+            # Inject project context: directory path and file listing
+            project_ctx = f"## Project Location\nProject root: {project_path}\n"
+            try:
+                files = list(project_path.rglob('*'))
+                ignore = {'target', '.git', '.cargo', '_workspace'}
+                file_list = []
+                for f in sorted(files):
+                    if f.is_file() and not any(p in ignore for p in f.parts):
+                        rel = f.relative_to(project_path)
+                        file_list.append(f"  {rel}  ({f.stat().st_size} bytes)")
+                if file_list:
+                    project_ctx += "## Project Files\n"
+                    project_ctx += "\n".join(file_list) + "\n"
+            except Exception:
+                pass
+
+            combined_context = (project_ctx + "\n" + (prev_output or '')).strip()
+
             result = self.dispatcher.run_agent(
                 defn, agent_cfg["goal"],
-                context=prev_output if prev_output else "",
+                context=combined_context,
                 tier=tier,
             )
             self._cost_tracker.record_result(agent_cfg["role"], result)
@@ -535,6 +555,13 @@ class Executor:
                 result = self.dispatcher.handle_failure(defn, agent_cfg["goal"],
                                                          prev_output, result, tier)
             self.ws.write_output(run_id, stage_id, agent_cfg["role"], result.output)
+
+            # Execute any ---actions--- blocks from agent output (e.g. compiler fixes)
+            actions = self._exec_actions(result.output, project_path)
+            if actions:
+                yield {"type": "progress", "stage": stage_id,
+                       "msg": f"  -> executed {len(actions)} fix actions from {agent_cfg['role']}"}
+
             yield {"type": "progress", "stage": stage_id, "agent": agent_cfg["role"]}
 
     # ── Existing Pattern: Producer-Reviewer ──
@@ -703,12 +730,30 @@ class Executor:
                 defn = load_agent(role)
                 tier = agent_cfg.get('model_assignment', {}).get('tier', 'balanced')
 
+                # Inject project context: directory path and file listing
+                project_context = f"## Project Location\nProject root: {project_path}\n"
+                try:
+                    files = list(project_path.rglob('*'))
+                    ignore = {'target', '.git', '.cargo', '_workspace'}
+                    file_list = []
+                    for f in sorted(files):
+                        if f.is_file() and not any(p in ignore for p in f.parts):
+                            rel = f.relative_to(project_path)
+                            file_list.append(f"  {rel}  ({f.stat().st_size} bytes)")
+                    if file_list:
+                        project_context += "## Project Files\n"
+                        project_context += "\n".join(file_list) + "\n"
+                except Exception:
+                    pass
+
                 yield {'type': 'progress', 'stage': stage_id,
                        'msg': f'Running {role}... ({i+1}/{len(agents_cfg)})'}
 
+                compiler_context = (project_context + "\n" + (prev_output or '')).strip()
+
                 result = self.dispatcher.run_agent(
                     defn, agent_cfg['goal'],
-                    context=prev_output if prev_output else '',
+                    context=compiler_context,
                     tier=tier,
                 )
                 self._cost_tracker.record_result(role, result)

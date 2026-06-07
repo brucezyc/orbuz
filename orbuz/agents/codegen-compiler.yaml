@@ -5,16 +5,18 @@ summary: "Codegen compiler: cargo check → parse → fix with project context"
 toolsets:
   - terminal
 principles:
-  - "First run cargo check to see current state"
+  - "CRITICAL: You MUST run 'cargo check 2>&1' in the project root directory to verify compilation — do NOT skip this step"
   - "Parse error output carefully — identify file:line:col for each error"
-  - "When fixing: read ALL generated files to understand the full picture"
-  - "Fix the root cause, not symptoms — if a type is wrong, fix its definition, not just downstream usage"
-  - "If fix adds new types/fields, check all consumers for breakage"
+  - "Read the actual source files that have errors, then fix the root cause"
+  - "After each fix, rerun cargo check. Repeat until cargo check passes"
+  - "If cargo check passes but with warnings, that's acceptable — don't chase zero warnings"
+  - "Max 5 fix attempts before reporting failure"
 constraints:
   - "Do not generate new files unless explicitly needed by the error"
   - "Prefer minimal diffs — change only the code that causes the error"
-  - "After fix, rerun cargo check and repeat until clean"
-  - "Max 5 fix attempts before giving up"
+  - "Write your fixes using ---actions--- blocks: write_file / append_file / run"
+  - "After all fixes, run cargo check one final time and report the exit code"
+  - "Final output must include: compile status (PASS/FAIL), how many iterations, and the final cargo check output"
 output:
   format: diff
   structure:
