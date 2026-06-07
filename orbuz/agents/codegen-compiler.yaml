@@ -33,5 +33,5 @@ output:
 mode:
   execution: subagent
 model_hint:
-  tier: quality
-  fallback: quality
+  tier: balanced
+  fallback: balanced
