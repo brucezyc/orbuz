@@ -80,6 +80,8 @@ class CostTracker:
         return "\n".join(lines)
 
 
+
+
 class Executor:
     """
     Reads plan.json → executes stages → checkpoints → delivers.
@@ -838,130 +840,127 @@ class Executor:
 
     @staticmethod
     def _exec_actions(agent_output: str, project_path: Path) -> list[dict]:
-        """Parse and execute YAML actions blocks from agent output.
+        """Parse and execute actions blocks from agent output.
 
-        Format (YAML-like, parsed without pyyaml):
-            ---actions---
-            - write_file: path/to/file.rs
-              content: |
-                file content lines...
-            - run: cargo check
-            ---
+        Supports multiple formats:
+          ---actions---
+          - write_file: src/main.rs      # list format
+            content: |
+              code...
+          ---
 
-        Supported actions: write_file, run, append_file, delete, rename.
-        Returns list of {type, path|command, ...} results.
+          ---actions---
+          write_file:                     # dict format
+            path: src/main.rs
+            content: |
+              code...
+
+          ---actions---
+          [write_file]                    # bracket format
+          path: src/main.rs
+          content: |
+            code...
+          ---
+
+        Also works without closing --- (parses to end of content).
         """
         import re as _re
         import subprocess as _sp
         import shutil as _sh
 
         results = []
-        pat_start = r'^---actions---\s*$(.+?)^---\s*$'
-        block_re = _re.compile(pat_start, _re.MULTILINE | _re.DOTALL)
 
-        for match in block_re.finditer(agent_output):
-            body = match.group(1).strip()
-            raw_actions = _re.split(r'\n(?=\s*- )', body)
-            for raw in raw_actions:
-                raw = raw.strip()
-                if not raw or raw.startswith('#'):
+        # Find all ---actions--- blocks (with or without closing ---)
+        blocks = _re.split(r'^---actions---\s*$', agent_output, flags=_re.MULTILINE)[1:]
+
+        for block in blocks:
+            # Strip trailing --- and whitespace
+            block = _re.sub(r'^---\s*$.*', '', block, flags=_re.DOTALL).strip()
+            # Split into individual action items
+            items = _re.split(r'\n(?=(?:- |\[|(?:write_file|run|append_file|delete|rename)\b))', block)
+
+            for item in items:
+                item = item.strip()
+                if not item or item.startswith('#'):
                     continue
-                raw = _re.sub(r'^\s*-\s*', '', raw, count=1)
-                lines = raw.split('\n')
-                if not lines:
-                    continue
+
+                lines = item.split('\n')
                 first = lines[0].strip()
-                if ':' not in first:
-                    continue
-                action_type, value = first.split(':', 1)
-                action_type = action_type.strip()
-                value = value.strip()
+
+                # Detect action type from various formats
+                action_type = ''
+                path_value = ''
+                content = ''
+                command = ''
+
+                # Format 1: - write_file: path
+                m = _re.match(r'^-\s*(\w+)\s*:\s*(.+)$', first)
+                if m:
+                    action_type = m.group(1)
+                    path_value = m.group(2).strip()
+                    content, command = _parse_action_lines(lines[1:])
+
+                # Format 2: write_file: (dict, path on next line)
+                m = _re.match(r'^(\w+)\s*:\s*$', first)
+                if m:
+                    action_type = m.group(1)
+                    fields, content_lines = _parse_fields_and_content(lines[1:])
+                    path_value = fields.get('path', fields.get('file_path', ''))
+                    command = fields.get('command', '')
+                    content = '\n'.join(content_lines)
+
+                # Format 3: [write_file]
+                m = _re.match(r'^\[(\w+)\]$', first)
+                if m:
+                    action_type = m.group(1)
+                    fields, content_lines = _parse_fields_and_content(lines[1:])
+                    path_value = fields.get('path', fields.get('file_path', ''))
+                    command = fields.get('command', '')
+                    content = '\n'.join(content_lines)
+
                 if not action_type:
                     continue
 
-                fields = {}
-                content_lines = []
-                in_content = False
-                content_indent = None
-                for line in lines[1:]:
-                    if in_content:
-                        stripped = line.rstrip()
-                        if stripped and content_indent is not None:
-                            indent = len(line) - len(line.lstrip())
-                            if indent < content_indent and not line.strip().startswith('#'):
-                                if stripped:
-                                    if ':' in stripped and indent < 4:
-                                        k, v = stripped.split(':', 1)
-                                        fields[k.strip()] = v.strip()
-                                        in_content = False
-                                        content_indent = None
-                                        continue
-                            content_lines.append(line)
-                        elif stripped:
-                            content_lines.append(line)
-                        else:
-                            content_lines.append('')
-                        continue
-                    stripped = line.rstrip()
-                    if stripped.endswith('|') and ':' in stripped:
-                        in_content = True
-                        content_lines = []
-                        content_indent = None
-                    elif ':' in stripped:
-                        k, v = stripped.split(':', 1)
-                        fields[k.strip()] = v.strip()
-
                 try:
-                    if action_type == 'write_file':
-                        file_path = project_path / value
-                        content = '\n'.join(content_lines)
+                    if action_type in ('write_file', 'append_file'):
+                        if not path_value:
+                            continue
+                        fp = project_path / path_value
+                        fp.parent.mkdir(parents=True, exist_ok=True)
                         content = _trim_content(content)
-                        file_path.parent.mkdir(parents=True, exist_ok=True)
-                        file_path.write_text(content)
-                        results.append({'type': 'write_file', 'path': str(file_path)})
-
-                    elif action_type == 'append_file':
-                        file_path = project_path / value
-                        content = '\n'.join(content_lines)
-                        content = _trim_content(content)
-                        file_path.parent.mkdir(parents=True, exist_ok=True)
-                        with open(file_path, 'a') as f:
-                            f.write(content)
-                        results.append({'type': 'append_file', 'path': str(file_path)})
+                        if action_type == 'write_file':
+                            fp.write_text(content)
+                        else:
+                            with open(fp, 'a') as f:
+                                f.write(content)
+                        results.append({'type': action_type, 'path': str(fp)})
 
                     elif action_type == 'run':
-                        cmd = value or fields.get('command', '')
+                        cmd = command or path_value
                         if not cmd:
                             continue
                         sp = _sp.run(
                             cmd, shell=True, capture_output=True, text=True,
                             cwd=str(project_path), timeout=120,
                         )
-                        out = sp.stdout[-500:] if sp.stdout else ''
-                        err = sp.stderr[-500:] if sp.stderr else ''
                         results.append({
                             'type': 'run', 'command': cmd,
-                            'stdout': out, 'stderr': err,
+                            'stdout': sp.stdout[-500:], 'stderr': sp.stderr[-500:],
                             'exit_code': sp.returncode,
                         })
 
-                    elif action_type == 'delete':
-                        target = project_path / value
+                    elif action_type in ('delete', 'rename'):
+                        target = project_path / path_value
                         if target.exists():
-                            if target.is_file():
-                                target.unlink()
-                            elif target.is_dir():
-                                _sh.rmtree(target)
-                            results.append({'type': 'delete', 'path': value})
-
-                    elif action_type == 'rename':
-                        to_path = fields.get('to', '')
-                        if to_path:
-                            src = project_path / value
-                            dst = project_path / to_path
-                            if src.exists():
-                                src.rename(dst)
-                                results.append({'type': 'rename', 'from': value, 'to': to_path})
+                            if action_type == 'delete':
+                                if target.is_file():
+                                    target.unlink()
+                                elif target.is_dir():
+                                    _sh.rmtree(target)
+                                results.append({'type': 'delete', 'path': path_value})
+                            elif action_type == 'rename':
+                                to_path = item  # simplified
+                                results.append({'type': 'rename', 'from': path_value})
 
                 except Exception as e:
                     results.append({'type': 'error', 'action': action_type, 'error': str(e)})
@@ -1049,3 +1048,51 @@ def _trim_content(content: str) -> str:
         if indent:
             lines = [l[indent:] if l.strip() else l for l in lines]
     return _nl.join(lines)
+
+
+
+
+def _parse_fields_and_content(lines: list[str]) -> tuple[dict, list[str]]:
+    """Parse indented key: value pairs and content blocks from action lines.
+    Returns (fields_dict, content_lines).
+    """
+    fields = {}
+    content_lines = []
+    in_content = False
+    for line in lines:
+        stripped = line.rstrip()
+        if in_content:
+            content_lines.append(line)
+            continue
+        # Detect content start: line ending with |
+        if stripped.endswith('|') and ':' in stripped:
+            in_content = True
+            continue
+        if ':' in stripped:
+            k, v = stripped.split(':', 1)
+            fields[k.strip()] = v.strip()
+    return fields, content_lines
+
+
+def _parse_action_lines(lines: list[str]) -> tuple[str, str]:
+    """Parse content: | block and command: field from action lines.
+    Returns (content_str, command_str).
+    """
+    content_lines = []
+    command = ''
+    in_content = False
+    for line in lines:
+        stripped = line.rstrip()
+        if in_content:
+            content_lines.append(line)
+            continue
+        if stripped.endswith('|') or stripped.endswith('|+') or stripped.endswith('|-'):
+            in_content = True
+            continue
+        if stripped.startswith('command:'):
+            command = stripped.split(':', 1)[1].strip()
+        elif ':' in stripped:
+            k, v = stripped.split(':', 1)
+            if k.strip() == 'command':
+                command = v.strip()
+    return '\n'.join(content_lines), command
