@@ -64,12 +64,15 @@ class Orchestrator:
             agent_list_lines.append(f"    Summary: {a.summary}")
             if tags:
                 agent_list_lines.append(f"    Tags: {tags}")
+        if not agent_list_lines:
+            agent_list_lines.append("  (no agents defined — create appropriate generic role names)")
 
         system = (
             "You are a task planning expert (Recon Orchestrator). Your responsibilities are:\n"
             "1. Analyze the user's research topic\n"
             "2. Decompose it into appropriate execution stages\n"
             "3. Select matching roles from the available agent library\n"
+            "   If no agents are defined, invent appropriate generic role names\n"
             "4. Assign a model tier (cheap/balanced/quality) to each agent\n"
             "5. Output a strict JSON-format plan\n"
             "Do not execute the tasks — only output the plan."

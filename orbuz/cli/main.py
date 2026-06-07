@@ -85,14 +85,16 @@ def main():
     # orbuz run
     run = sub.add_parser("run", help="Start a workflow")
     run.add_argument("topic", help="Research topic")
+    run.add_argument("--auto", action="store_true",
+                     help="Auto-approve plan and checkpoints (no interactive prompts)")
     run.add_argument("--config", default=None,
                      help="YAML config file with API keys/base URLs")
-    run.add_argument("--quality-model", required=True,
-                     help="Quality model ID (e.g. 'anthropic/claude-opus-4-8')")
-    run.add_argument("--balanced-model", required=True,
-                     help="Balanced model ID (e.g. 'anthropic/claude-sonnet-4-6')")
-    run.add_argument("--cheap-model", required=True,
-                     help="Cheap model ID (e.g. 'deepseek/deepseek-v4-flash')")
+    run.add_argument("--quality-model", default=None,
+                     help="Quality model ID (default: from DEFAULT_MODELS)")
+    run.add_argument("--balanced-model", default=None,
+                     help="Balanced model ID (default: from DEFAULT_MODELS)")
+    run.add_argument("--cheap-model", default=None,
+                     help="Cheap model ID (default: from DEFAULT_MODELS)")
     run.add_argument("--api-key", default=None,
                      help="LLM API key (or set ANTHROPIC_API_KEY or DEEPSEEK_API_KEY env var)")
     run.add_argument("--api-base", default=None,
@@ -241,7 +243,11 @@ def _cmd_run(args):
 
     # 2. Display plan -> wait for user approval
     print_plan(plan)
-    approved = _wait_approval()
+    if args.auto:
+        approved = True
+        print("  Auto-approve: yes")
+    else:
+        approved = _wait_approval()
     if not approved:
         print("Stop User rejected, exiting")
         return
@@ -255,7 +261,11 @@ def _cmd_run(args):
     for event in exe.run():
         if event["type"] == "checkpoint":
             print_checkpoint(event)
-            decision = _wait_checkpoint_decision()
+            if args.auto:
+                decision = {"action": "continue"}
+                print("  Auto-continue checkpoint")
+            else:
+                decision = _wait_checkpoint_decision()
             exe.continue_with(decision)
         elif event["type"] == "done":
             print(f"\nDone. Output: {event['output_path']}")
