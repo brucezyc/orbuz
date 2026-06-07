@@ -282,6 +282,33 @@ class Orchestrator:
             except json.JSONDecodeError:
                 pass
 
+        # Strategy 4: Truncated JSON — progressive strip from end
+        m = re.search(r'\{.*', text, re.DOTALL)
+        if m:
+            partial = m.group(0)
+            # Try progressively shorter versions
+            for pct in [1.0, 0.95, 0.9, 0.85, 0.8, 0.75]:
+                cutoff = int(len(partial) * pct)
+                candidate = partial[:cutoff]
+                # Close unmatched braces
+                opens = candidate.count('{')
+                closes = candidate.count('}')
+                if opens > closes:
+                    candidate = candidate.rstrip().rstrip(',') + '\n' * (opens - closes) + '}'
+                try:
+                    return json.loads(candidate)
+                except json.JSONDecodeError:
+                    pass
+
+            # Last resort: try raw_decode (finds valid prefix)
+            try:
+                decoder = json.JSONDecoder()
+                obj, _ = decoder.raw_decode(partial)
+                if isinstance(obj, dict):
+                    return obj
+            except (json.JSONDecodeError, ValueError):
+                pass
+
         return None
 
 

@@ -380,8 +380,23 @@ class Executor:
                    "round": round_num, "agents": len(agents_cfg)}
 
             round_results: dict[str, DispatcherResult] = {}
+            project_path = Path(stage.get("project_dir", ".")).resolve()
             for agent_cfg in agents_cfg:
                 role = agent_cfg["role"]
+
+                # Check for manifest actions (pre-built by Orchestrator, skip LLM)
+                if 'actions' in agent_cfg:
+                    yield {'type': 'progress', 'stage': stage_id,
+                           'msg': f'  {role}: executing {len(agent_cfg["actions"])} manifest actions...'}
+                    results = self._exec_manifest_actions(
+                        agent_cfg['actions'], project_path
+                    )
+                    for a in results:
+                        status = 'OK' if a.get('exit_code', 0) == 0 else 'FAIL'
+                        yield {'type': 'progress', 'stage': stage_id,
+                               'msg': f'    {a.get("type","?")}: {a.get("path","") or a.get("command","")} [{status}]'}
+                    continue
+
                 defn = load_agent(role)
                 tier = agent_cfg.get("model_assignment", {}).get("tier", "balanced")
 
