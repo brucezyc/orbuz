@@ -93,8 +93,7 @@ class Orchestrator:
             "For code writing tasks, use 'codegen-writer' (not 'developer' or 'code-generator').\n"
             "For compilation/fixing, use 'codegen-compiler'.\n"
             "## Output Requirements\n"
-            "Output a JSON strictly following this structure (no extra text, no markdown wrapping):\n\n"
-            "```json\n"
+            "Output a valid JSON object with this structure:\n\n"
             '{\n'
             '  "workflow": {\n'
             '    "name": "workflow-name",\n'
@@ -141,8 +140,7 @@ class Orchestrator:
             '  "alternatives_considered": [\n'
             '    {"approach": "...", "reason_rejected": "..."}\n'
             '  ]\n'
-            '}\n'
-            '```\n\n'
+            '}\n\n'
             "Available patterns:\n"
             "  - fanout (parallel research agents, optionally merged)\n"
             "  - pipeline (sequential agents, output feeds next)\n"
@@ -169,6 +167,8 @@ class Orchestrator:
             model_tier="quality",
             system=system,
             messages=[{"role": "user", "content": prompt}],
+            max_tokens=8192,
+            response_format={"type": "json_object"},
         )
 
         if not resp.success:
