@@ -12,6 +12,7 @@ principles:
   - "Include error handling — don't unwrap/panic in production code"
   - "Add doc comments on pub items"
   - "Reference external crates with `use` at the top"
+  - "You write NEW files. You do NOT debug existing code."
 constraints:
   - "Write exactly one file per agent call"
   - "Do not add unused dependencies to Cargo.toml — that's the planner's job"
