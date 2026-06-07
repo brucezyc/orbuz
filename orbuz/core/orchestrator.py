@@ -16,7 +16,7 @@ import re
 from datetime import datetime, timezone
 from pathlib import Path
 from orbuz.schema.plan import PlanJSON, ReconSummary
-from orbuz.schema.agent import load_index
+from orbuz.schema.agent import load_index, load_agent
 from orbuz.llm.client import LLMClient
 
 
@@ -60,7 +60,11 @@ class Orchestrator:
         agent_list_lines = []
         for a in index.agents:
             tags = ", ".join(a.tags) if a.tags else ""
-            agent_list_lines.append(f"  - {a.name}")
+            # Load full definition to show capabilities
+            full_defn = load_agent(a.name)
+            has_tools = bool(full_defn.toolsets)
+            tools_hint = f" [tools: {', '.join(full_defn.toolsets)}]" if has_tools else ""
+            agent_list_lines.append(f"  - {a.name}{tools_hint}")
             agent_list_lines.append(f"    Summary: {a.summary}")
             if tags:
                 agent_list_lines.append(f"    Tags: {tags}")
@@ -132,10 +136,11 @@ class Orchestrator:
             '  ]\n'
             '}\n'
             '```\n\n'
-            "Available patterns: fanout (parallel), pipeline (sequential), producer_reviewer (produce→review cycle)\n"
+            "Available patterns: fanout (parallel), pipeline (sequential), producer_reviewer (produce->review cycle)\n"
             "Available model tiers: cheap (information gathering), balanced (default), quality (analysis/synthesis)\n"
             "Select the best-matching agent name from the library for the `role` field.\n"
             "If no exact match exists, use the closest one available.\n"
+            "NOTE: For code generation / compilation / testing tasks, prefer agents tagged with 'codegen' - they have filesystem tools and can read/write files.\n"
             "Output only JSON, no explanation."
         )
 
