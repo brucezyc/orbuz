@@ -653,6 +653,7 @@ class Executor:
                 tier=tier,
                 tools=TOOL_SCHEMAS if project_path else None,
                 project_path=str(project_path) if project_path else None,
+                workspace_dir=str(self.ws.base / run_id) if self.run_id else None,
             )
             if not result.success:
                 result = self.dispatcher.handle_failure(defn, agent_cfg["goal"],
@@ -871,6 +872,7 @@ class Executor:
                         tier=tier,
                         tools=TOOL_SCHEMAS,
                         project_path=str(project_path),
+                        workspace_dir=str(self.ws.base / run_id) if self.run_id else None,
                     )
                     self._cost_tracker.record_result(role, result)
                     suffix = self._fanout_suffix.get(role, 0) + 1
@@ -933,6 +935,7 @@ class Executor:
                     tier=tier,
                     tools=TOOL_SCHEMAS,
                     project_path=str(project_path),
+                    workspace_dir=str(self.ws.base / run_id) if self.run_id else None,
                 )
                 self._cost_tracker.record_result(role, result)
                 self.ws.write_output(run_id, stage_id, role, result.output)

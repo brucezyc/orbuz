@@ -184,6 +184,35 @@ SEARCH_SCHEMA = {
     },
 }
 
+UPDATE_CHECKPOINT_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "update_checkpoint",
+        "description": (
+            "Update your working checkpoint — a short-term notepad (<200 tokens) "
+            "that is automatically injected into your system prompt each turn. "
+            "Use this to record: current progress, key constraints, pitfalls found, "
+            "file paths, and next steps. Call during early/mid stages, "
+            "before subtask switches, or after finding important info. "
+            "DO NOT call when the task is simple (1-2 steps) or at the very end."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "key_info": {
+                    "type": "string",
+                    "description": (
+                        "Replaces current checkpoint content (<200 tokens). "
+                        "Keep valid info from previous checkpoint, add new findings. "
+                        "Store: progress, pitfalls, user requirements, file paths, next steps."
+                    ),
+                },
+            },
+            "required": ["key_info"],
+        },
+    },
+}
+
 # All tool schemas for codegen sub-agents
 TOOL_SCHEMAS: list[dict] = [
     WRITE_FILE_SCHEMA,
@@ -191,6 +220,7 @@ TOOL_SCHEMAS: list[dict] = [
     READ_FILE_SCHEMA,
     PATCH_SCHEMA,
     SEARCH_SCHEMA,
+    UPDATE_CHECKPOINT_SCHEMA,
 ]
 
 # ── Dispatch ──

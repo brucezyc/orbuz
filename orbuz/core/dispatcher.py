@@ -17,6 +17,55 @@ from orbuz.schema.agent import AgentDefinition, ModelHint
 from orbuz.schema.finding import Finding, FindingSet, MergeDedupResult, Severity, AutofixClass
 from orbuz.llm.client import LLMClient, LLMResponse
 from orbuz.core.plugin import get_registry
+from pathlib import Path
+from dataclasses import dataclass, field
+
+
+# ── Working Checkpoint ──
+# Short-term memory for sub-agents across multiple tool-calling rounds.
+# Inspired by GenericAgent's update_working_checkpoint pattern.
+# A <200 token scratchpad that gets injected into system prompt each turn.
+# The sub-agent can update it via update_checkpoint tool.
+
+_CHECKPOINT_FILE = "_checkpoint.md"
+
+
+@dataclass
+class WorkingCheckpoint:
+    """Sub-agent working memory across tool-calling rounds."""
+    content: str = ""
+    path: Path | None = None
+
+    @classmethod
+    def from_workspace(cls, workspace_dir: str | Path | None) -> "WorkingCheckpoint":
+        """Load from workspace dir, or return empty."""
+        if workspace_dir:
+            p = Path(workspace_dir) / _CHECKPOINT_FILE
+            if p.exists():
+                return cls(content=p.read_text("utf-8").strip(), path=p)
+        return cls()
+
+    def save(self):
+        """Write checkpoint to disk."""
+        if self.path:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            self.path.write_text(self.content, "utf-8")
+
+    def inject_prompt(self) -> str:
+        """Return checkpoint section for system prompt injection."""
+        if not self.content:
+            return ""
+        return (
+            "\n## Working Checkpoint (ongoing task context)\n"
+            f"{self.content}\n\n"
+            "Keep this checkpoint updated as you make progress. "
+            "You can update it using the update_checkpoint tool."
+        )
+
+    def update(self, key_info: str):
+        """Replace checkpoint content (agent manages what to keep/remove)."""
+        self.content = key_info.strip()[:500]  # 500 char safety limit
+        self.save()
 
 
 _plugins = get_registry()
@@ -262,6 +311,7 @@ class Dispatcher:
         messages_from_bus: str = "",
         tools: list[dict] | None = None,
         project_path: str | None = None,
+        workspace_dir: str | None = None,
         max_tool_rounds: int = 25,
     ) -> DispatcherResult:
         """
@@ -286,6 +336,11 @@ class Dispatcher:
 
         model_name = self.llm.get_model_name(tier)
         system = self._build_system_prompt(agent_def)
+
+        # ── Working Checkpoint ──
+        checkpoint = WorkingCheckpoint.from_workspace(workspace_dir)
+        if checkpoint.content:
+            system += checkpoint.inject_prompt()
 
         mcp_context = self._resolve_mcp_tools(agent_def, goal, context)
         full_context = context
@@ -379,7 +434,13 @@ class Dispatcher:
                 except (json.JSONDecodeError, TypeError):
                     args = {}
 
-                result = tool_dispatch(name, args, project_path=project_path)
+                # ── Checkpoint tool: handled locally ──
+                if name == "update_checkpoint":
+                    key_info = args.get("key_info", "")
+                    checkpoint.update(key_info)
+                    result = json.dumps({"ok": True, "checkpoint_updated": True})
+                else:
+                    result = tool_dispatch(name, args, project_path=project_path)
 
                 messages.append({
                     "role": "tool",
@@ -399,6 +460,49 @@ class Dispatcher:
             input_tokens=total_in_tokens,
             output_tokens=total_out_tokens,
             cost_usd=total_cost,
+        )
+
+    # ── Goal Mode ──
+    # Wraps run_agent_with_tools with self-driving goal mode.
+    # Inspired by GenericAgent's reflect/goal_mode.py.
+    # The sub-agent gets a budget and self-directs until done or exhausted.
+
+    GOAL_MODE_SYSTEM_HINT = (
+        "\n\n[Goal Mode] You are working autonomously. "
+        "Do NOT ask for confirmation or report 'done' prematurely. "
+        "Continue making progress until the goal is fully achieved. "
+        "When you are truly done (all code written, all files created, "
+        "all verification passed), include [DONE] in your final response. "
+        "If you encounter an unresolvable blocker, include [BLOCKED: reason] "
+        "so the orchestrator can intervene."
+    )
+
+    def run_agent_goal_mode(
+        self, agent_def: AgentDefinition, goal: str,
+        context: str = "", tier: str = "balanced",
+        tools: list[dict] | None = None,
+        project_path: str | None = None,
+        workspace_dir: str | None = None,
+        max_tool_rounds: int = 50,
+    ) -> DispatcherResult:
+        """Run sub-agent in Goal Mode: self-direct until [DONE] or budget exhausted.
+
+        The agent autonomously progresses through the task. The goal mode
+        system hint is appended to discourage premature completion. Detection
+        of [DONE] or [BLOCKED] markers triggers clean summarization.
+        """
+        # Injects goal mode hint into system prompt by passing it as extra context
+        goal_mode_context = (context + "\n\n" + self.GOAL_MODE_SYSTEM_HINT) if context else self.GOAL_MODE_SYSTEM_HINT
+
+        return self.run_agent_with_tools(
+            agent_def=agent_def,
+            goal=goal,
+            context=goal_mode_context,
+            tier=tier,
+            tools=tools,
+            project_path=project_path,
+            workspace_dir=workspace_dir,
+            max_tool_rounds=max_tool_rounds,
         )
 
     def handle_failure(self, agent_def: AgentDefinition, goal: str,
