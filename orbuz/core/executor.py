@@ -4,98 +4,27 @@ Executor — plan.json Executor
 Input: approved plan.json + LLMClient
 Flow: iterate stages → dispatch by pattern → checkpoint → continue
 
-Execution patterns:
-  fanout            → parallel agents + message bus (Round 1..N)
-  pipeline          → sequential agents
-  producer_reviewer → produce → review → cycle
-  code_review       → Compound Engineering-style: scope → persona selection →
-                      parallel dispatch → merge-dedup → synthesis
+Key improvements (this iteration):
+  - Multi-round fanout: Round 1 output → bus.route() → Round 2 injects cross-feed
+  - Discovery messages are automatically published to the bus
+  - Agent communication registration
+  - Escalation chain integration
+
+All LLM calls go through Dispatcher + LLMClient, never directly to the API.
+Mock mode and real mode share the same code path.
 """
-from __future__ import annotations
-import json
-import os
-import time
-from dataclasses import dataclass, field
-from pathlib import Path
-from orbuz.core.dispatcher import Dispatcher, DispatcherResult, merge_dedup_findings
-from orbuz.core.selector import select_personas, describe_team
+
+from orbuz.core.dispatcher import Dispatcher, DispatcherResult
+from orbuz.core.shell_runner import ShellRunner, ShellResult
 from orbuz.agent.message import MessageBus, Message, CommunicationSpec
 from orbuz.workspace.manager import WorkspaceManager
 from orbuz.llm.client import LLMClient
 from orbuz.schema.agent import load_agent, ModelHint
-from orbuz.schema.finding import FindingSet, Finding, Severity, AutofixClass
-from orbuz.core.plugin import get_registry
-from orbuz.codegen.tools import TOOL_SCHEMAS
-
-
-_plugins = get_registry()
-
-
-# ── Cost Tracker ──
-
-@dataclass
-class CostTracker:
-    """Tracks token usage and cost across a workflow run."""
-    total_input_tokens: int = 0
-    total_output_tokens: int = 0
-    total_cost_usd: float = 0.0
-    total_duration_s: float = 0.0
-    per_agent: dict[str, dict] = field(default_factory=dict)
-
-    def record(self, agent_name: str, in_tokens: int, out_tokens: int,
-               cost_usd: float, duration_s: float = 0.0, model: str = ""):
-        self.total_input_tokens += in_tokens
-        self.total_output_tokens += out_tokens
-        self.total_cost_usd += cost_usd
-        self.total_duration_s += duration_s
-        if agent_name not in self.per_agent:
-            self.per_agent[agent_name] = {
-                "calls": 0, "input_tokens": 0, "output_tokens": 0,
-                "cost_usd": 0.0, "duration_s": 0.0, "models": [],
-            }
-        self.per_agent[agent_name]["calls"] += 1
-        self.per_agent[agent_name]["input_tokens"] += in_tokens
-        self.per_agent[agent_name]["output_tokens"] += out_tokens
-        self.per_agent[agent_name]["cost_usd"] += cost_usd
-        self.per_agent[agent_name]["duration_s"] += duration_s
-        if model and model not in self.per_agent[agent_name]["models"]:
-            self.per_agent[agent_name]["models"].append(model)
-
-    def record_result(self, agent_name: str, result: DispatcherResult):
-        """Record from a DispatcherResult."""
-        self.record(agent_name, result.input_tokens, result.output_tokens,
-                    result.cost_usd, result.duration_s, result.model_used)
-
-    def summary(self) -> dict:
-        return {
-            "total_cost_usd": round(self.total_cost_usd, 4),
-            "total_input_tokens": self.total_input_tokens,
-            "total_output_tokens": self.total_output_tokens,
-            "total_tokens": self.total_input_tokens + self.total_output_tokens,
-            "per_agent": self.per_agent,
-        }
-
-    def summary_str(self) -> str:
-        s = self.summary()
-        lines = [
-            f"Cost: ${s['total_cost_usd']:.4f} | "
-            f"Tokens: {s['total_tokens']:,} "
-            f"({s['total_input_tokens']:,} in / {s['total_output_tokens']:,} out)"
-        ]
-        by_cost = sorted(s["per_agent"].items(), key=lambda x: x[1]["cost_usd"], reverse=True)
-        for name, stats in by_cost[:5]:
-            lines.append(f"  {name}: ${stats['cost_usd']:.4f} ({stats['calls']} calls, "
-                         f"{stats['input_tokens']+stats['output_tokens']:,} tokens)")
-        if len(by_cost) > 5:
-            lines.append(f"  ... and {len(by_cost) - 5} more agents")
-        return "\n".join(lines)
-
-
 
 
 class Executor:
     """
-    Reads plan.json → executes stages → checkpoints → delivers.
+    Reads plan.json → executes stages → checkpoints → delivers
 
     Usage:
         exe = Executor(plan, llm_client=llm_client)
@@ -109,277 +38,22 @@ class Executor:
 
     MAX_ROUNDS = 3  # Multi-round fanout limit
 
-    def __init__(self, plan: dict, llm_client: LLMClient, run_id: str | None = None,
-                 webhook_url: str | None = None, project_dir: str | None = None):
+    def __init__(self, plan: dict, llm_client: LLMClient):
         self.plan = plan
         self.dispatcher = Dispatcher(llm_client)
         self.ws = WorkspaceManager()
-        self.bus = None
+        self.bus = None  # Created in init_run
         self._decision = None
-        self._cost_tracker = CostTracker()
-        self.run_id = run_id
-        self.webhook_url = webhook_url
-        self.project_dir = project_dir
-        self._fanout_suffix = {}
-        # Heartbeat tracking
-        self._last_webhook_ts = 0.0
-        self._heartbeat_interval = 300  # 5 min
-
-    def _maybe_heartbeat(self, run_id: str, stage_id: str = "", stage_name: str = ""):
-        """Emit heartbeat if silent for > heartbeat_interval seconds."""
-        if time.time() - self._last_webhook_ts > self._heartbeat_interval:
-            self._call_webhook(run_id, stage_id, stage_name, "running",
-                               event_type="heartbeat")
 
     # ── Main entry ──
 
-    @staticmethod
-    def _agent_meta(result: DispatcherResult) -> dict:
-        """Build metadata dict from a DispatcherResult for logging."""
-        return {
-            "input_tokens": result.input_tokens,
-            "output_tokens": result.output_tokens,
-            "cost_usd": round(result.cost_usd, 6),
-            "duration_s": round(result.duration_s, 2),
-            "model_used": result.model_used,
-            "tier_used": result.tier_used,
-            "success": result.success,
-            "error": result.error[:200] if result.error else None,
-            "claims": len(result.claims),
-        }
-
-    def _generate_summary(self) -> str:
-        """Generate a detailed task summary with status, costs, and project context."""
-
-        def _stage_status(run_id, stage_id) -> str:
-            try:
-                return self.ws.get_stage_status(run_id, stage_id) or "unknown"
-            except Exception:
-                return "unknown"
-
-        s = self._cost_tracker.summary()
-        plan = self.plan
-        stages = plan.get("plan", plan).get("stages", plan.get("stages", []))
-        task_name = plan.get("workflow", {}).get("name", plan.get("name", "unnamed"))
-        task_desc = plan.get("workflow", {}).get("description", "")
-        run_id = self.run_id or ""
-
-        # Determine overall status
-        all_completed = all(
-            _stage_status(run_id, st.get("id", "")) == "completed" for st in stages
-        ) if run_id and stages else False
-        any_failed = any(
-            _stage_status(run_id, st.get("id", "")) in ("failed", "error") for st in stages
-        ) if run_id and stages else False
-        if all_completed:
-            overall = "COMPLETED"
-        elif any_failed:
-            overall = "PARTIAL"
-        else:
-            overall = "COMPLETED"  # no explicit failure tracking = assume done
-
-        lines = []
-        lines.append(f"# Task Summary: {task_name}")
-        lines.append(f"**Status:** `{overall}`")
-        if task_desc:
-            lines.append(f"> {task_desc}")
-        lines.append(f"**Run ID:** `{run_id}`")
-        lines.append(f"**Model:** {s.get('per_agent', {}).get(list(s.get('per_agent', {}).keys())[0] if s.get('per_agent', {}) else '', {}).get('models', ['?'])[0]}")
-        lines.append("")
-
-        # ── Stage results ──
-        lines.append("## Stages")
-        for stage in stages:
-            sid = stage.get("id", "?")
-            sname = stage.get("name", "")
-            pattern = stage.get("pattern", "?")
-            status = _stage_status(run_id, sid) if run_id else "unknown"
-            agents = stage.get("agents", stage.get("tasks", []))
-            if not agents:
-                agents = stage.get("review_agents", [])
-            agent_list = []
-            for a in agents:
-                if isinstance(a, str):
-                    agent_list.append(f"`{a}`")
-                else:
-                    agent_list.append(f"`{a.get('role','?')}`")
-            lines.append(f"\n### {sid} — {sname} `[{status}]`")
-            lines.append(f"- **Pattern:** {pattern}")
-            lines.append(f"- **Agents:** {', '.join(agent_list) if agent_list else '(none)'}")
-            # Read agent outputs for this stage
-            if run_id:
-                for a in agents:
-                    role = a if isinstance(a, str) else a.get("role", "")
-                    if not role:
-                        continue
-                    out_path = self.ws.base / run_id / sid / f"{role}.md"
-                    if out_path.exists():
-                        content = out_path.read_text().strip()
-                        preview = content[:200] + ("..." if len(content) > 200 else "")
-                        if preview:
-                            lines.append(f"  - **{role} output:** {preview.replace(chr(10), ' ')}")
-                    meta_path = self.ws.base / run_id / sid / f"{role}.meta.json"
-                    if meta_path.exists():
-                        try:
-                            meta = json.loads(meta_path.read_text())
-                            if isinstance(meta, list) and meta:
-                                m = meta[-1]  # last attempt
-                                lines.append(f"    cost=${m.get('cost_usd',0):.4f} tokens={m.get('input_tokens',0)+m.get('output_tokens',0)} success={m.get('success',False)}")
-                        except Exception:
-                            pass
-
-        # ── Cost summary ──
-        lines.append("\n## Cost & Token Usage")
-        lines.append(f"\n**Total:** ${s['total_cost_usd']:.4f} | "
-                     f"Tokens: {s['total_tokens']:,} "
-                     f"({s['total_input_tokens']:,} in / {s['total_output_tokens']:,} out) | "
-                     f"Duration: {self._cost_tracker.total_duration_s:.1f}s")
-        lines.append("")
-        per_agent = s.get("per_agent", {})
-        if per_agent:
-            lines.append("| Agent | Calls | Input | Output | Cost |")
-            lines.append("|---|---|---|---|---|")
-            for name, stats in sorted(per_agent.items(),
-                                      key=lambda x: -x[1].get("cost_usd", 0)):
-                inp = stats.get("input_tokens", 0)
-                out = stats.get("output_tokens", 0)
-                cost = stats.get("cost_usd", 0)
-                lines.append(f"| `{name}` | {stats.get('calls',0)} | {inp:,} | {out:,} | "
-                             f"${cost:.4f} |")
-
-        # ── Git changes (if project dir under git) ──
-        if self.project_dir:
-            import subprocess as _sp
-            try:
-                git_dir = Path(self.project_dir)
-                r = _sp.run(["git", "-C", str(git_dir), "diff", "--stat"],
-                           capture_output=True, text=True, timeout=10)
-                if r.stdout.strip():
-                    lines.append("\n## Git Changes (uncommitted)")
-                    lines.append(f"```\n{r.stdout.strip()}\n```")
-                r2 = _sp.run(["git", "-C", str(git_dir), "log", "--oneline", "-5"],
-                            capture_output=True, text=True, timeout=10)
-                if r2.stdout.strip():
-                    lines.append("\n## Recent Commits")
-                    lines.append(f"```\n{r2.stdout.strip()}\n```")
-            except Exception:
-                pass
-
-        # ── Next steps (from plan) ──
-        if stages:
-            next_stages = [s for s in stages if _stage_status(run_id, s.get("id", "")) != "completed"] if run_id else stages
-            if next_stages:
-                lines.append("\n## Remaining")
-                for s in next_stages:
-                    agents = [a.get("role", "?") if isinstance(a, dict) else str(a) for a in s.get("agents", s.get("tasks", s.get("review_agents", [])))]
-                    lines.append(f"- **{s.get('id','?')}:** {', '.join(agents) if agents else '(no agents)'}")
-                lines.append("")
-
-        result = "\n".join(lines) + "\n"
-        return result
-
-    # ── Project context discovery ──
-
-    def _load_previous_context(self) -> str:
-        """Scan project directory for previous orbuz run summaries.
-
-        Returns a markdown string describing prior work for injection
-        into the orchestrator prompt or run context.
-        """
-        if not self.project_dir:
-            return ""
-        workspace = Path(self.project_dir) / "_workspace"
-        if not workspace.exists():
-            return ""
-
-        summaries = sorted(
-            workspace.glob("*/summary.md"),
-            key=lambda p: p.stat().st_mtime,
-            reverse=True,
-        )
-        if not summaries:
-            # No summary files — check for any run directories with output
-            run_dirs = sorted(
-                [d for d in workspace.iterdir() if d.is_dir() and d.name != "current"],
-                key=lambda d: d.stat().st_mtime,
-                reverse=True,
-            )
-            if not run_dirs:
-                return ""
-            # Read status from recent runs
-            lines = ["## Previous Orbuz Runs (no summary found)"]
-            for d in run_dirs[:3]:
-                status_file = d / "status.json"
-                if status_file.exists():
-                    try:
-                        st = json.loads(status_file.read_text())
-                        state = st.get("state", "unknown")
-                        stages = st.get("stages", [])
-                        stage_statuses = ", ".join(f"{s['id']}: {s['status']}" for s in stages[:5])
-                        lines.append(f"- `{d.name}` — state={state} | {stage_statuses}")
-                    except Exception:
-                        lines.append(f"- `{d.name}` — (unreadable)")
-                else:
-                    lines.append(f"- `{d.name}` — (no status)")
-            return "\n".join(lines)
-
-        # Read the most recent summary
-        latest = summaries[0]
-        run_id = latest.parent.name
-        content = latest.read_text().strip()
-        # Truncate to keep context manageable
-        if len(content) > 3000:
-            content = content[:3000] + "\n...(truncated)"
-
-        lines = [
-            "## Previous Orbuz Run",
-            f"**Run:** `{run_id}`",
-            f"**Summary:**",
-            content,
-        ]
-
-        # Check for more recent runs (up to 3 total)
-        if len(summaries) > 1:
-            lines.append("\n### Older Runs")
-            for s in summaries[1:4]:
-                rid = s.parent.name
-                preview = s.read_text().strip()[:200].replace("\n", " ")
-                lines.append(f"- `{rid}` — {preview}...")
-
-        return "\n".join(lines)
-
     def run(self):
-        """Generator: yields events."""
-        # ── Plugin hook: before_workflow ──
-        plan = _plugins.run("before_workflow", self.plan) or self.plan
-        stages = plan["plan"]["stages"] if "plan" in plan else plan.get("stages", [])
-        stages = plan.get("stages", stages)  # manifest format
-
-        # ── Resume or fresh run ──
-        if self.run_id:
-            run_id = self.run_id
-            self.ws.set_state(run_id, "executing")
-            status = self.ws.read_current_status()
-            start_from = status.get("current_stage_index", 0) if status else 0
-            # Mark run as resumed
-            ctx_path = self.ws.base / run_id / "context.json"
-            if ctx_path.exists():
-                ctx = json.loads(ctx_path.read_text())
-                ctx.setdefault("continuation", {})["resumed"] = True
-                ctx_path.write_text(json.dumps(ctx, ensure_ascii=False, indent=2))
-        else:
-            run_id = self.ws.init_run(plan)
-            start_from = 0
-            self.run_id = run_id
-
-        # ── Webhook: run_start ──
-        self._call_webhook(run_id, "", "orchestrator", "running",
-                           event_type="run_start", extra={
-                               "total_stages": len(stages),
-                               "plan_name": plan.get("workflow", {}).get("name",
-                                           plan.get("name", "unnamed")),
-                           })
-
+        """
+        Generator: yields events.
+        Caller receives checkpoint and calls continue_with() with user decision.
+        """
+        stages = self.plan["plan"]["stages"]
+        run_id = self.ws.init_run(self.plan)
         self.bus = MessageBus(
             workspace_dir=str(self.ws.base / run_id)
         )
@@ -391,44 +65,31 @@ class Executor:
                 comm_data = self._get_comm(defn)
                 self.bus.register_agent(agent_cfg["role"], comm_data)
 
+        self.ws.set_state(run_id, "executing")
+
         for idx, stage in enumerate(stages):
-            # Skip completed stages (resume mode)
-            stage_id = stage["id"]
-            stage_status = self.ws.get_stage_status(run_id, stage_id) if self.run_id else "pending"
-            if stage_status == "completed":
-                continue
-
             self.ws.set_current_stage(run_id, idx)
-
-            # ── Heartbeat ──
-            self._maybe_heartbeat(run_id, stage_id, stage.get("name", "?"))
-
-            # ── Webhook: stage_progress ──
-            self._call_webhook(run_id, stage_id, stage.get("name", stage.get("pattern", "?")),
-                               "running", event_type="stage_progress",
-                               extra={"stage_index": idx, "total_stages": len(stages)})
+            stage_id = stage["id"]
 
             # Validate dependencies
             for dep_id in stage.get("depends_on", []):
-                dep_status = self.ws.get_stage_status(run_id, dep_id)
-                if dep_status != "completed":
-                    self._call_webhook(run_id, stage_id, stage.get("name", "?"),
-                                       "failed", event_type="agent_error",
-                                       extra={"error": f"Dependency {dep_id} not completed ({dep_status})"})
-                    yield {"type": "error", "msg": f"Dependency {dep_id} not completed (status={dep_status})"}
+                if self.ws.get_stage_status(run_id, dep_id) != "completed":
+                    yield {"type": "error", "msg": f"Dependency {dep_id} not completed"}
                     return
 
-            # Execute by pattern (unified: all patterns use pipeline)
-            pattern = stage.get("pattern", "pipeline")
-            yield from self._exec_pipeline(run_id, stage, idx)
+            # Execute
+            if stage["pattern"] == "fanout":
+                yield from self._exec_fanout(run_id, stage, idx)
+            elif stage["pattern"] == "pipeline":
+                yield from self._exec_pipeline(run_id, stage, idx)
+            elif stage["pattern"] == "producer_reviewer":
+                yield from self._exec_producer_reviewer(run_id, stage, idx)
+            else:
+                yield {"type": "error", "msg": f"Unknown pattern: {stage.get('pattern')}"}
+                return
 
             # Mark complete
             self.ws.set_stage_completed(run_id, stage_id)
-
-            # Webhook callback
-            if self.webhook_url:
-                summary = self.ws.get_stage_summary(run_id, stage_id)
-                self._call_webhook(run_id, stage_id, stage.get("name", ""), "completed", summary)
 
             # Checkpoint
             if idx < len(stages) - 1:
@@ -441,8 +102,11 @@ class Executor:
                     "summary": summary,
                     "next_stage": stages[idx + 1].get("name", ""),
                 }
+                # If caller passed a decision (sync mode), handle it directly
                 if decision:
                     self._handle_checkpoint_decision(run_id, decision)
+
+                # Wait for async decision (generator mode)
                 while self._decision is None:
                     yield {"type": "waiting"}
                 self._handle_checkpoint_decision(run_id, self._decision)
@@ -450,271 +114,71 @@ class Executor:
 
         # Done
         self.ws.set_state(run_id, "completed")
-
-        cost_summary = self._cost_tracker.summary()
-
-        # ── Plugin hook: after_workflow ──
-        _plugins.run("after_workflow", {
-            "run_id": run_id,
-            "output_path": f"_workspace/{run_id}/deliver/",
-            "cost_summary": cost_summary,
-        })
-
-        # Persist cost summary to workspace
-        self.ws.write_cost_summary(run_id, cost_summary)
-
-        # Generate and persist task summary
-        summary_md = self._generate_summary()
-        summary_path = self.ws.base / run_id / "summary.md"
-        summary_path.write_text(summary_md)
-
-        yield {"type": "done", "run_id": run_id, "output_path": f"_workspace/{run_id}/deliver/",
-               "cost_summary": cost_summary, "summary": summary_md}
-
-        # ── Webhook: run_complete ──
-        self._call_webhook(run_id, "", "orchestrator", "completed",
-                           event_type="run_complete",
-                           extra={"output_path": f"_workspace/{run_id}/deliver/",
-                                  "summary_md": summary_md[:500]})
+        yield {"type": "done", "run_id": run_id, "output_path": f"_workspace/{run_id}/deliver/"}
 
     def continue_with(self, decision: dict):
+        """Called after a checkpoint"""
         self._decision = decision
 
-    # ── Core: Code Review Pattern ──
-
-    def _exec_code_review(self, run_id, stage, idx):
-        """
-        Compound Engineering-style code review pipeline.
-
-        Stage 1: Determine scope (diff range, file list)
-        Stage 2: Persona selection via selector.py
-        Stage 3: Parallel dispatch to all selected reviewers
-        Stage 4: Merge + dedup findings
-        Stage 5: Synthesis + confidence gating → final report
-        """
-        stage_id = stage["id"]
-        yield {"type": "progress", "stage": stage_id, "msg": "Starting code review"}
-
-        # ── Stage 1: Scope ──
-        base_branch = stage.get("base", "main")
-        yield {"type": "progress", "stage": stage_id, "msg": f"Computing diff against {base_branch}"}
-
-        import subprocess
-        try:
-            result = subprocess.run(
-                ["git", "diff", "--stat", base_branch],
-                capture_output=True, text=True, timeout=30
-            )
-            diff_stat = result.stdout
-            diff_lines = len(diff_stat.splitlines())
-
-            result2 = subprocess.run(
-                ["git", "diff", "--name-only", base_branch],
-                capture_output=True, text=True, timeout=30
-            )
-            file_list = [f.strip() for f in result2.stdout.splitlines() if f.strip()]
-
-            result3 = subprocess.run(
-                ["git", "diff", base_branch],
-                capture_output=True, text=True, timeout=30
-            )
-            diff_content = result3.stdout
-
-            yield {"type": "progress", "stage": stage_id,
-                   "msg": f"Diff: {len(file_list)} files, ~{diff_lines} lines changed"}
-        except (subprocess.TimeoutExpired, FileNotFoundError) as e:
-            yield {"type": "error", "msg": f"Git diff failed: {e}"}
-            return
-
-        # ── Stage 2: Persona Selection ──
-        if stage.get("review_agents"):
-            # Explicit agent list from workflow YAML
-            agents = [load_agent(name) for name in stage["review_agents"]]
-        else:
-            agents = select_personas(
-                diff_file_list=file_list,
-                diff_lines=diff_lines,
-                diff_content=diff_content,
-            )
-
-        team_desc = describe_team(agents)
-        yield {"type": "progress", "stage": stage_id, "msg": team_desc}
-
-        # ── Stage 3: Parallel Dispatch ──
-        all_finding_sets: list[FindingSet] = []
-        goal = stage.get("goal", "Review the code changes and identify issues.")
-
-        for agent_def in agents:
-            yield {"type": "progress", "stage": stage_id,
-                   "msg": f"Running {agent_def.name}..."}
-
-            context = (
-                f"## Diff Scope\n{len(file_list)} files changed\n\n"
-                f"## Files Changed\n" + "\n".join(file_list) + "\n\n"
-                f"## Diff Content\n{diff_content[:8000]}"
-            )
-
-            result = self.dispatcher.run_agent(
-                agent_def,
-                goal=goal,
-                context=context,
-                tier=agent_def.model_hint.tier,
-                require_structured_findings=True,
-            )
-            self._cost_tracker.record_result(agent_def.name, result)
-            self.ws.write_output(run_id, stage_id,
-                                 f"{agent_def.name}", result.output)
-            self.ws.write_agent_meta(run_id, stage_id, agent_def.name,
-                                     self._agent_meta(result))
-
-            if result.findings and result.findings.findings:
-                all_finding_sets.append(result.findings)
-                yield {"type": "progress", "stage": stage_id,
-                       "msg": f"  → {len(result.findings.findings)} findings from {agent_def.name}"}
-
-        # ── Stage 4: Merge + Dedup ──
-        dedup_result = merge_dedup_findings(all_finding_sets)
-        yield {"type": "progress", "stage": stage_id,
-               "msg": (f"Merge: {dedup_result.duplicates_removed} duplicates removed, "
-                       f"{dedup_result.severity_overrides} overrides")}
-
-        # Write merged findings
-        merged_path = self.ws.write_output(
-            run_id, stage_id, "merged_findings",
-            json.dumps([f.to_dict() for f in dedup_result.merged],
-                       ensure_ascii=False, indent=2)
-        )
-
-        # ── Stage 5: Synthesis (confidence gate) ──
-        # Filter: min confidence 0.3
-        high_conf = [f for f in dedup_result.merged if f.confidence >= 0.3]
-        low_conf = [f for f in dedup_result.merged if f.confidence < 0.3]
-
-        # Generate review report
-        report_lines = ["# Code Review Report", ""]
-        report_lines.append(f"**Reviewers:** {len(agents)}")
-        report_lines.append(f"**Files:** {len(file_list)}")
-        report_lines.append(f"**Findings:** {len(dedup_result.merged)} total "
-                            f"({len(high_conf)} high-confidence, {len(low_conf)} gated)")
-        report_lines.append("")
-
-        # By severity
-        for sev in ["P0", "P1", "P2", "P3"]:
-            items = [f for f in dedup_result.merged
-                     if f.severity.value == sev and f.confidence >= 0.3]
-            if items:
-                report_lines.append(f"## {sev} — {len(items)} items")
-                for f in items:
-                    loc = f"{f.file}:{f.line}" if f.line else f.file
-                    report_lines.append(f"- **{f.title}** [{f.confidence:.1f}] ({loc})")
-                    report_lines.append(f"  {f.description[:200]}")
-                    if f.suggested_fix:
-                        report_lines.append(f"  Fix: {f.suggested_fix}")
-                    report_lines.append("")
-
-        # Low confidence / gated
-        if low_conf:
-            report_lines.append(f"## Gated ({len(low_conf)} low-confidence items)")
-            for f in low_conf:
-                report_lines.append(f"- {f.short()}")
-
-        # Summary counts
-        by_sev = {}
-        for f in dedup_result.merged:
-            s = f.severity.value
-            by_sev[s] = by_sev.get(s, 0) + 1
-        report_lines.append("")
-        report_lines.append("## Summary")
-        for sev in ["P0", "P1", "P2", "P3"]:
-            report_lines.append(f"- {sev}: {by_sev.get(sev, 0)}")
-
-        report = "\n".join(report_lines)
-        self.ws.write_output(run_id, stage_id, "review_report", report)
-        yield {"type": "progress", "stage": stage_id,
-               "msg": f"Review complete — {len(dedup_result.merged)} findings, "
-                      f"{dedup_result.duplicates_removed} duplicates removed"}
-
-    # ── Existing Pattern: Fanout ──
+    # ── Pattern execution ──
 
     def _exec_fanout(self, run_id, stage, idx):
         """Multi-round fanout + message bus routing"""
         stage_id = stage["id"]
-        agents_cfg = stage["agents"]
+        agents = stage["agents"]
         merge = stage.get("merge", {})
 
-        all_agent_results: dict[str, DispatcherResult] = {}
+        all_agent_results = {}
 
         for round_num in range(1, self.MAX_ROUNDS + 1):
             yield {"type": "progress", "stage": stage_id,
-                   "round": round_num, "agents": len(agents_cfg)}
+                   "round": round_num, "agents": len(agents)}
 
-            round_results: dict[str, DispatcherResult] = {}
-            project_path = Path(stage.get("project_dir", ".")).resolve()
-            for agent_cfg in agents_cfg:
+            # Build context for each agent this round
+            round_results = {}
+            for agent_cfg in agents:
                 role = agent_cfg["role"]
-
-                # Check for manifest actions (pre-built by Orchestrator, skip LLM)
-                if 'actions' in agent_cfg:
-                    yield {'type': 'progress', 'stage': stage_id,
-                           'msg': f'  {role}: executing {len(agent_cfg["actions"])} manifest actions...'}
-                    results = self._exec_manifest_actions(
-                        agent_cfg['actions'], project_path
-                    )
-                    for a in results:
-                        status = 'OK' if a.get('exit_code', 0) == 0 else 'FAIL'
-                        yield {'type': 'progress', 'stage': stage_id,
-                               'msg': f'    {a.get("type","?")}: {a.get("path","") or a.get("command","")} [{status}]'}
-                    continue
-
                 defn = load_agent(role)
                 tier = agent_cfg.get("model_assignment", {}).get("tier", "balanced")
 
+                # If previous round results exist, inject them into context
                 prev_output = all_agent_results.get(role, None)
                 context = ""
                 if prev_output:
                     context = f"Your previous round output length: {len(prev_output.output)} characters"
 
+                # Get relevant messages from the bus
                 bus_msgs = self.bus.build_cross_feed(stage_id)
                 if not bus_msgs.strip():
                     bus_msgs = ""
 
+                # Inject shared space file list
                 shared_ctx = self.ws.inject_shared_context(run_id)
 
+                # First execution: include the goal-specified context
                 if round_num == 1:
                     base_ctx = f"Time range: {self.plan.get('recon_summary', {}).get('timeframe', '')}"
                     context = context + "\n" + base_ctx if context else base_ctx
 
+                # Merge context + shared + bus
                 full_context = "\n".join(filter(None, [context, shared_ctx]))
                 full_bus = bus_msgs if bus_msgs.strip() else ""
 
+                # Execute
                 result = self.dispatcher.run_agent(
                     defn, agent_cfg["goal"],
                     context=full_context,
                     tier=tier,
                     messages_from_bus=full_bus,
                 )
-                self._cost_tracker.record_result(role, result)
+
                 if not result.success:
                     result = self.dispatcher.handle_failure(defn, agent_cfg["goal"],
                                                              full_context, result, tier)
 
-                # ── Reentrant decomposition ──
-                # If agent reports "marked for decomposition", split the subtask
-                if not result.success and "decomposition" in (result.error or "").lower():
-                    yield {"type": "progress", "stage": stage_id,
-                           "msg": f"  🔄 分解任务: {role} 任务过大, 拆分为子任务"}
-                    sub_results = self._decompose_goal(
-                        run_id, stage_id, role, agent_cfg["goal"],
-                        full_context, tier,
-                    )
-                    for sub_role, sub_result in sub_results:
-                        round_results[f"{role}_sub_{sub_role}"] = sub_result
-                        self._cost_tracker.record_result(f"{role}_sub_{sub_role}", sub_result)
-                    # Skip writing original failed result
-                    continue
-
                 round_results[role] = result
 
+                # Publish claims to the bus
                 if result.claims:
                     msg = Message.discovery(
                         from_agent=role,
@@ -724,16 +188,19 @@ class Executor:
                     )
                     self.bus.publish(msg)
 
+                # Write output to workspace
                 self.ws.write_output(run_id, stage_id, f"{role}_r{round_num}", result.output)
-                self.ws.write_agent_meta(run_id, stage_id, f"{role}_r{round_num}",
-                                         self._agent_meta(result))
 
+            # Merge this round's results into the overall results
             for role, result in round_results.items():
                 if role not in all_agent_results:
                     all_agent_results[role] = result
-                elif result.output.strip():
-                    all_agent_results[role] = result
+                else:
+                    # Keep the most recent non-empty result
+                    if result.output.strip():
+                        all_agent_results[role] = result
 
+            # Determine if another round is needed
             routing = self.bus.route(stage_id)
             has_cross_feed = bool(routing)
             if not has_cross_feed or round_num >= self.MAX_ROUNDS:
@@ -744,6 +211,7 @@ class Executor:
             merge_defn = load_agent(merge.get("agent_role", "merge-agent"))
             merge_tier = merge.get("model_assignment", {}).get("tier", "balanced")
 
+            # Build merge context: list all output paths
             merge_ctx_parts = ["Merge the following search results:"]
             for role, result in all_agent_results.items():
                 merge_ctx_parts.append(f"\n- {role}: {len(result.output)} characters")
@@ -758,24 +226,23 @@ class Executor:
                 context="\n".join(merge_ctx_parts),
                 tier=merge_tier,
             )
-            self._cost_tracker.record_result("merge-agent", merge_result)
             self.ws.write_output(run_id, stage_id, "merged", merge_result.output)
-            self.ws.write_agent_meta(run_id, stage_id, "merged",
-                                     self._agent_meta(merge_result))
             yield {"type": "progress", "stage": stage_id, "msg": "merge complete"}
 
-        # Update summary
+        # Update stage summary
         summary = {
             "key_findings": [],
             "tokens_used": sum(r.tokens for r in all_agent_results.values()),
             "rounds": self.MAX_ROUNDS,
         }
+        # Extract key_findings from claims
         for role, result in all_agent_results.items():
             for claim in result.claims:
                 summary["key_findings"].append(
                     f"{claim.get('statement', '')[:100]} ({role})"
                 )
-
+        # Update status.json (via workspace manager)
+        import json
         status_path = self.ws.base / run_id / "status.json"
         if status_path.exists():
             data = json.loads(status_path.read_text())
@@ -784,12 +251,13 @@ class Executor:
                     s["summary"] = summary
             status_path.write_text(json.dumps(data, ensure_ascii=False, indent=2))
 
-    # ── Existing Pattern: Pipeline ──
-
     def _exec_pipeline(self, run_id, stage, idx):
-        """Sequential execution"""
-        project_dir = stage.get('project_dir', '.')
-        project_path = Path(project_dir).resolve()
+        """Sequential execution with optional error_handler self-healing loop.
+
+        When an agent has error_handler configured (run_command, max_retries > 1,
+        fallback_role, or non-default pass_condition), uses _run_retry_loop
+        instead of single-shot execution.
+        """
         stage_id = stage["id"]
         for i, agent_cfg in enumerate(stage.get("agents", [])):
             defn = load_agent(agent_cfg["role"])
@@ -800,264 +268,231 @@ class Executor:
                 prev_role = stage["agents"][i - 1]["role"]
                 prev_output = self.ws.read_output(run_id, stage_id, prev_role)
 
-            # Inject project context: directory path and file listing
-            project_ctx = f"## Project Location\nProject root: {project_path}\n"
-            try:
-                files = list(project_path.rglob('*'))
-                ignore = {'target', '.git', '.cargo', '_workspace'}
-                file_list = []
-                for f in sorted(files):
-                    if f.is_file() and not any(p in ignore for p in f.parts):
-                        rel = f.relative_to(project_path)
-                        file_list.append(f"  {rel}  ({f.stat().st_size} bytes)")
-                if file_list:
-                    project_ctx += "## Project Files\n"
-                    project_ctx += "\n".join(file_list) + "\n"
-            except Exception:
-                pass
-
-            combined_context = (project_ctx + "\n" + (prev_output or '')).strip()
-
-            exe_cfg = defn.execution
-            # ── Heartbeat ──
-            self._maybe_heartbeat(run_id, stage_id, agent_cfg["role"])
-
-            # ── Webhook: agent_progress (start) ──
-            stages_total = len(self.plan.get("plan", self.plan).get("stages",
-                             self.plan.get("stages", [])))
-            self._call_webhook(run_id, stage_id, agent_cfg["role"],
-                               "running", event_type="agent_progress",
-                               extra={"agent_index": i, "goal": agent_cfg.get("goal", "")[:80]})
-
-            result = self.dispatcher.run_agent_with_tools(
-                defn, agent_cfg["goal"],
-                context=combined_context,
-                tier=tier,
-                tools=TOOL_SCHEMAS if project_path else None,
-                project_path=str(project_path) if project_path else None,
-                workspace_dir=str(self.ws.base / run_id) if self.run_id else None,
-                max_cost_usd=exe_cfg.max_cost_usd,
-                auto_git=exe_cfg.auto_git_commit,
-                max_tool_rounds=exe_cfg.max_tool_rounds,
+            # Check if error_handler is configured
+            eh = agent_cfg.get("error_handler", {}) or {}
+            has_eh = bool(
+                eh.get("run_command")
+                or eh.get("max_retries", 0) > 1
+                or eh.get("fallback_role")
+                or eh.get("pass_condition", "") not in ("", "exit_code == 0")
             )
-            if not result.success:
-                result = self.dispatcher.handle_failure(defn, agent_cfg["goal"],
-                                                         prev_output, result, tier,
-                                                         tools=TOOL_SCHEMAS if project_path else None,
-                                                         project_path=str(project_path) if project_path else None)
-                # ── Webhook: agent_error ──
+
+            if has_eh:
+                # Self-healing loop
+                final = yield from self._run_retry_loop(
+                    run_id, stage_id, i, agent_cfg, defn, tier, prev_output
+                )
+                result = final.get("result", DispatcherResult(success=False))
+                status = final.get("status", "failed")
+                retries = final.get("retries", 0)
+                self.ws.write_output(run_id, stage_id, agent_cfg["role"],
+                                     result.output)
+                yield {
+                    "type": "progress", "stage": stage_id,
+                    "agent": agent_cfg["role"], "status": status,
+                    "retries": retries, "tokens": result.tokens,
+                }
+            else:
+                # Simple single-shot (original behavior)
+                result = self.dispatcher.run_agent(
+                    defn, agent_cfg["goal"],
+                    context=prev_output if prev_output else "",
+                    tier=tier,
+                )
                 if not result.success:
-                    self._call_webhook(run_id, stage_id, agent_cfg["role"],
-                                       "failed", event_type="agent_error",
-                                       extra={"error": result.error[:200] if result.error else ""})
+                    result = self.dispatcher.handle_failure(
+                        defn, agent_cfg["goal"], prev_output, result, tier
+                    )
 
-            # ── Webhook: budget_exhausted ──
-            if result.output and "Budget exhausted" in result.output:
-                self._call_webhook(run_id, stage_id, agent_cfg["role"],
-                                   "completed", event_type="budget_exhausted")
-            self._cost_tracker.record_result(agent_cfg["role"], result)
-            self.ws.write_output(run_id, stage_id, agent_cfg["role"], result.output)
-            self.ws.write_agent_meta(run_id, stage_id, agent_cfg["role"],
-                                     self._agent_meta(result))
-
-            yield {"type": "progress", "stage": stage_id, "agent": agent_cfg["role"]}
-
-    # ── Existing Pattern: Producer-Reviewer ──
+                self.ws.write_output(run_id, stage_id, agent_cfg["role"],
+                                     result.output)
+                yield {"type": "progress", "stage": stage_id,
+                       "agent": agent_cfg["role"]}
 
     def _exec_producer_reviewer(self, run_id, stage, idx):
         """Produce → review → cycle"""
         stage_id = stage["id"]
-        agents_cfg = stage.get("agents", [])
+        agents = stage.get("agents", [])
         max_cycles = stage.get("max_cycles", 3)
-        producer = agents_cfg[0] if agents_cfg else None
-        reviewer = agents_cfg[1] if len(agents_cfg) > 1 else None
+        producer = agents[0] if agents else None
+        reviewer = agents[1] if len(agents) > 1 else None
 
         if not producer:
             yield {"type": "error", "msg": "producer_reviewer requires at least 1 producer agent"}
             return
 
         for cycle in range(1, max_cycles + 1):
+            # Produce
             p_defn = load_agent(producer["role"])
             p_tier = producer.get("model_assignment", {}).get("tier", "balanced")
             p_result = self.dispatcher.run_agent(p_defn, producer["goal"], tier=p_tier)
-            self._cost_tracker.record_result(producer["role"], p_result)
             self.ws.write_output(run_id, stage_id, f"{producer['role']}_v{cycle}", p_result.output)
-            self.ws.write_agent_meta(run_id, stage_id, f"{producer['role']}_v{cycle}",
-                                     self._agent_meta(p_result))
             yield {"type": "progress", "stage": stage_id, "cycle": cycle, "msg": "produced"}
 
+            # Review
             if reviewer:
                 r_defn = load_agent(reviewer["role"])
                 r_tier = reviewer.get("model_assignment", {}).get("tier", "balanced")
                 r_ctx = f"Review the following content:\n{p_result.output[:2000]}"
                 r_result = self.dispatcher.run_agent(r_defn, reviewer["goal"], r_ctx, tier=r_tier)
-                self._cost_tracker.record_result(reviewer["role"], r_result)
                 verdict = "PASS" if "PASS" in r_result.output else "FAIL"
                 yield {"type": "progress", "stage": stage_id, "cycle": cycle, "verdict": verdict}
                 if verdict == "PASS":
                     break
 
-    # ── Reentrant Decomposition ──
+    # ── Self-healing retry loop ──
 
-    def _decompose_goal(self, run_id, stage_id, role, goal, context, tier):
+    def _run_retry_loop(self, run_id, stage_id, agent_idx, agent_cfg,
+                         defn, tier, prev_output, max_cycles=3):
         """
-        当一个 agent 返回 reentrant/decomposition 时使用。
-        调 Orchestrator 对子目标做 recon → 生成 sub-stages → 逐一 dispatch。
+        Execute an agent with error_handler: run → check → retry/escalate → loop.
 
-        返回: [(sub_role, DispatcherResult), ...]
+        Yields progress events, returns final dispatcher result + metadata.
         """
-        from orbuz.core.orchestrator import Orchestrator
-        sub_orch = Orchestrator(self.dispatcher.llm, agent_dir=str(self.ws.base))
-        sub_plan = sub_orch.recon(
-            topic=f"[子任务分解] {goal[:100]}",
-            workflow_name=f"{stage_id}_{role}_sub",
-        )
-        sub_stages = sub_plan.get("plan", {}).get("stages", [])
-        if not sub_stages:
-            return []
+        eh = agent_cfg.get("error_handler", {}) or {}
+        on_fail = eh.get("on_fail", "retry")
+        max_retries = eh.get("max_retries", 3)
+        retry_role = eh.get("retry_role", "") or agent_cfg["role"]
+        fallback_role = eh.get("fallback_role", "")
+        pass_condition = eh.get("pass_condition", "exit_code == 0")
+        run_command = eh.get("run_command", "")
+        input_from_role = eh.get("input_from_role", "")
 
-        results = []
-        for sub_stage in sub_stages:
-            sub_pattern = sub_stage.get("pattern", "pipeline")
-            if sub_pattern == "fanout":
-                for ac in sub_stage.get("agents", []):
-                    sub_role = ac["role"]
-                    defn = load_agent(sub_role)
-                    sub_result = self.dispatcher.run_agent(defn, ac["goal"], context=context, tier=tier)
-                    self.ws.write_output(run_id, stage_id, f"{role}_sub_{sub_role}", sub_result.output)
-                    self.ws.write_agent_meta(run_id, stage_id, f"{role}_sub_{sub_role}",
-                                             self._agent_meta(sub_result))
-                    results.append((sub_role, sub_result))
-            elif sub_pattern == "pipeline":
-                prev = ""
-                for ac in sub_stage.get("agents", []):
-                    sub_role = ac["role"]
-                    defn = load_agent(sub_role)
-                    sub_result = self.dispatcher.run_agent(defn, ac["goal"],
-                                                          context=context + "\n" + prev if prev else context,
-                                                          tier=tier)
-                    self.ws.write_output(run_id, stage_id, f"{role}_sub_{sub_role}", sub_result.output)
-                    self.ws.write_agent_meta(run_id, stage_id, f"{role}_sub_{sub_role}",
-                                             self._agent_meta(sub_result))
-                    results.append((sub_role, sub_result))
-                    prev = sub_result.output
+        # Determine the actual role to use for retries
+        current_role = agent_cfg["role"]
 
-        return results
+        attempts = 0
+        last_result = None
+        last_shell = None
+        last_output = prev_output
+
+        for attempt in range(1, max_retries + 1):
+            attempts = attempt
+            role_to_run = current_role
+
+            # If this is a retry attempt and retry_role differs, switch roles
+            if attempt > 1 and retry_role and retry_role != current_role:
+                role_to_run = retry_role
+
+            # Load agent def for the role we're actually using
+            try:
+                run_defn = load_agent(role_to_run) if role_to_run != defn.name else defn
+            except Exception:
+                run_defn = defn  # fallback
+
+            # Build context with previous failure info
+            context = last_output
+            if last_shell and not last_shell.exit_code == 0:
+                context += (
+                    f"\n\n## Previous Run Output (exit={last_shell.exit_code})\n"
+                    f"{last_shell.output[:2000]}"
+                )
+
+            # Dispatch agent
+            result = self.dispatcher.run_agent(
+                run_defn, agent_cfg["goal"],
+                context=context,
+                tier=tier,
+            )
+            if not result.success:
+                result = self.dispatcher.handle_failure(
+                    run_defn, agent_cfg["goal"], context, result, tier
+                )
+
+            last_result = result
+            self.ws.write_output(run_id, stage_id, f"{role_to_run}_a{attempt}",
+                                 result.output)
+            yield {
+                "type": "progress", "stage": stage_id,
+                "agent": role_to_run, "attempt": attempt,
+                "tokens": result.tokens, "cost": result.tokens * 0.00005,
+            }
+
+            # If no run_command check, consider agent output success as pass
+            if not run_command:
+                if result.success and result.output.strip():
+                    return {"result": result, "retries": attempt - 1,
+                            "status": "ok", "role": role_to_run}
+
+            # Execute shell command (compile, test, etc.)
+            if run_command:
+                # Inject agent output if command has placeholder
+                cmd = run_command
+                if "{output}" in cmd:
+                    cmd = cmd.replace("{output}",
+                                      f"{result.output[:3000]}")
+                last_shell = ShellRunner.run(cmd, timeout=eh.get("timeout", 60))
+
+                # Write shell output
+                self.ws.write_output(run_id, stage_id,
+                                     f"{role_to_run}_a{attempt}_shell",
+                                     last_shell.output)
+
+                # Evaluate pass condition
+                passed, reason = ShellRunner.check_condition(
+                    pass_condition, last_shell, result.output
+                )
+                yield {
+                    "type": "progress", "stage": stage_id,
+                    "agent": role_to_run, "attempt": attempt,
+                    "shell_exit": last_shell.exit_code,
+                    "passed": passed, "reason": reason,
+                }
+
+                if passed:
+                    return {"result": result, "shell": last_shell,
+                            "retries": attempt - 1, "status": "ok",
+                            "role": role_to_run}
+
+                # Save shell output for next attempt's context
+                last_output = (
+                    f"## Previous Attempt #{attempt} ({role_to_run})\n"
+                )
+                last_output += f"Agent output ({len(result.output)} chars):\n"
+                last_output += f"{result.output[:1000]}\n"
+                last_output += f"\nShell command: {cmd}\n"
+                last_output += f"Exit code: {last_shell.exit_code}\n"
+                if last_shell.output:
+                    last_output += f"Output:\n{last_shell.output[:2000]}\n"
+
+        # --- All attempts exhausted ---
+        # Try fallback_role if configured
+        if fallback_role and fallback_role != current_role:
+            yield {
+                "type": "progress", "stage": stage_id,
+                "msg": f"All {max_retries} attempts failed, escalating to {fallback_role}",
+            }
+            try:
+                fb_defn = load_agent(fallback_role)
+                fb_context = (
+                    f"Previous agent ({current_role}) failed after "
+                    f"{max_retries} attempts.\n"
+                    f"Last error:\n{last_shell.output if last_shell else ''}\n"
+                    f"\n{prev_output}"
+                )
+                fb_result = self.dispatcher.run_agent(
+                    fb_defn, agent_cfg["goal"],
+                    context=fb_context, tier=tier,
+                )
+                self.ws.write_output(run_id, stage_id,
+                                     f"{fallback_role}_fallback", fb_result.output)
+                return {"result": fb_result, "retries": max_retries,
+                        "status": "escalated", "role": fallback_role}
+            except Exception as e:
+                yield {"type": "error", "msg": f"Fallback failed: {e}"}
+
+        # Give up
+        return {"result": last_result, "retries": max_retries,
+                "status": "failed", "shell": last_shell, "role": current_role}
 
     # ── Internal ──
 
-
     def _get_comm(self, defn) -> CommunicationSpec:
+        """Extract the communication field from the agent definition"""
         data = getattr(defn, 'communication', None) or {}
         if isinstance(data, dict) and data:
             return CommunicationSpec(data)
         return CommunicationSpec()
-
-    def _call_webhook(self, run_id: str, stage_id: str, stage_name: str,
-                      status: str, summary: dict | None = None,
-                      event_type: str = "stage_complete", extra: dict | None = None):
-        """Send a webhook notification.
-
-        event_type: run_start | stage_progress | stage_complete | agent_progress
-                    | agent_error | budget_exhausted | heartbeat | run_complete
-        webhook_url can be:
-          - http://...      → HTTP POST (existing behavior)
-          - tg:TOKEN:CHAT   → Telegram message (no external server needed)
-        """
-        if not self.webhook_url:
-            return
-        self._last_webhook_ts = time.time()
-
-        payload = {
-            "event": event_type,
-            "run_id": run_id,
-            "stage_id": stage_id,
-            "stage_name": stage_name,
-            "status": status,
-            "summary": summary or {},
-            **(extra or {}),
-        }
-        cost = self._cost_tracker.summary() if event_type in ("run_complete", "budget_exhausted") else {}
-        if cost:
-            payload["cost"] = cost
-
-        # ── Telegram transport ──
-        if self.webhook_url.startswith("tg:"):
-            parts = self.webhook_url[3:].split(":", 1)
-            if len(parts) == 2:
-                token, chat_id = parts
-                self._send_telegram(token, chat_id, payload)
-            return
-
-        # ── HTTP POST transport ──
-        try:
-            import urllib.request
-            import os
-            import hmac
-            import hashlib
-            raw = json.dumps(payload)
-            data = raw.encode()
-            headers = {"Content-Type": "application/json"}
-            secret = os.environ.get("ORBUZ_WEBHOOK_SECRET", "")
-            if secret:
-                sig = hmac.new(secret.encode(), data, hashlib.sha256).hexdigest()
-                headers["X-Hub-Signature-256"] = f"sha256={sig}"
-            req = urllib.request.Request(
-                self.webhook_url, data=data, headers=headers, method="POST",
-            )
-            urllib.request.urlopen(req, timeout=10)
-        except Exception as e:
-            print(f"  [webhook] {e}")
-
-    def _send_telegram(self, token: str, chat_id: str, payload: dict):
-        """Send a formatted Telegram message from a webhook payload."""
-        import urllib.request
-        event = payload.get("event", "?")
-        run_id = payload.get("run_id", "")[:8]
-        stage = payload.get("stage_name", "") or payload.get("stage_id", "")
-
-        emoji = {
-            "run_start": "🚀", "stage_progress": "⏳", "stage_complete": "✅",
-            "agent_progress": "🤖", "agent_error": "❌", "budget_exhausted": "💰",
-            "heartbeat": "💓", "run_complete": "🎉",
-        }.get(event, "ℹ️")
-
-        lines = [f"{emoji} **orbuz {event.replace('_', ' ').title()}**"]
-        lines.append(f"Run: `{run_id}`")
-        if stage:
-            lines.append(f"Stage: `{stage}`")
-        summary = payload.get("summary", {})
-        if summary:
-            if isinstance(summary, dict):
-                for k, v in summary.items():
-                    if isinstance(v, (int, float)):
-                        lines.append(f"{k}: {v}")
-            elif isinstance(summary, str):
-                lines.append(summary[:200])
-        if payload.get("agent"):
-            lines.append(f"Agent: `{payload['agent']}`")
-        if payload.get("error"):
-            lines.append(f"Error: {payload['error'][:200]}")
-        cost = payload.get("cost", {})
-        if cost:
-            lines.append(f"Cost: ${cost.get('total_cost_usd', 0):.4f}")
-        if payload.get("output_path"):
-            lines.append(f"Output: `{payload['output_path']}`")
-
-        text = "\n".join(lines)
-        # Telegram API limit: 4096 chars
-        text = text[:4000]
-        try:
-            url = f"https://api.telegram.org/bot{token}/sendMessage"
-            params = json.dumps({
-                "chat_id": chat_id, "text": text,
-                "parse_mode": "Markdown", "disable_web_page_preview": True,
-            }).encode()
-            req = urllib.request.Request(url, data=params,
-                headers={"Content-Type": "application/json"}, method="POST")
-            urllib.request.urlopen(req, timeout=10)
-        except Exception as e:
-            print(f"  [tg] {e}")
 
     def _handle_checkpoint_decision(self, run_id, decision):
         action = decision.get("action", "continue")
@@ -1066,315 +501,24 @@ class Executor:
         elif action == "redirect":
             self.ws.set_continuation(run_id, decision.get("note", ""))
         elif action == "rerun":
-            pass  # Simplified
-
-    
-
-    
-    # ── Codegen pattern with YAML actions execution ──
-
-    def _exec_codegen(self, run_id, stage, idx):
-        """Codegen pattern: dispatch agents or execute manifest actions.
-
-        Two modes:
-          1. Manifest actions — agent_cfg has 'actions' list (JSON from Orchestrator)
-             Execute write_file/run directly, skip LLM call.
-          2. Agent output — dispatch the agent, parse ---actions--- blocks from output.
-
-        If stage has 'fanout: true', agents with manifest actions run in parallel
-        (independent write/run, no cross-agent context).
-        """
-        stage_id = stage['id']
-        agents_cfg = stage.get('agents', [])
-        project_dir = stage.get('project_dir', '.')
-        project_path = Path(project_dir).resolve()
-        is_fanout = stage.get('fanout', False)
-
-        yield {'type': 'progress', 'stage': stage_id,
-               'msg': f'Starting codegen ({len(agents_cfg)} agents)' +
-                      (', fanout mode' if is_fanout else '')}
-
-        prev_output = ''
-
-        if is_fanout:
-            # Fanout: collect all actions from agents, execute together
-            all_results = []
-            for agent_cfg in agents_cfg:
-                role = agent_cfg['role']
-                # Bypass manifest actions for codegen-writers — forces LLM to write real code
-                if 'actions' in agent_cfg and 'codegen-writer' not in role:
-                    # Manifest actions - execute immediately
-                    yield {'type': 'progress', 'stage': stage_id,
-                           'msg': f'  {role}: {len(agent_cfg["actions"])} manifest actions'}
-                    results = self._exec_manifest_actions(
-                        agent_cfg['actions'], project_path
-                    )
-                    for a in results:
-                        status = 'OK' if a.get('exit_code', 0) == 0 else 'FAIL'
-                        yield {'type': 'progress', 'stage': stage_id,
-                               'msg': f'    {a.get("type","?")}: {a.get("path","") or a.get("command","")} [{status}]'}
-                    all_results.extend(results)
-                else:
-                    # Mode 2: Dispatch agent via LLM, parse actions from output
-                    yield {'type': 'progress', 'stage': stage_id,
-                           'msg': f'  {role}: dispatching LLM agent...'}
-                    defn = load_agent(role)
-                    tier = agent_cfg.get('model_assignment', {}).get('tier', 'balanced')
-                    project_ctx = f"## Project Location\nProject root: {project_path}\n"
-                    try:
-                        files = list(project_path.rglob('*'))
-                        ignore = {'target', '.git', '.cargo', '_workspace'}
-                        flist = []
-                        for f in sorted(files):
-                            if f.is_file() and not any(p in ignore for p in f.parts):
-                                rel = f.relative_to(project_path)
-                                flist.append(f"  {rel}  ({f.stat().st_size} bytes)")
-                        if flist:
-                            project_ctx += "## Project Files\n" + "\n".join(flist) + "\n"
-                    except Exception:
-                        pass
-                    result = self.dispatcher.run_agent_with_tools(
-                        defn, agent_cfg['goal'],
-                        context=project_ctx.strip(),
-                        tier=tier,
-                        tools=TOOL_SCHEMAS,
-                        project_path=str(project_path),
-                        workspace_dir=str(self.ws.base / run_id) if self.run_id else None,
-                        max_cost_usd=defn.execution.max_cost_usd,
-                        auto_git=defn.execution.auto_git_commit,
-                        max_tool_rounds=defn.execution.max_tool_rounds,
-                        progress_callback=self._make_progress_callback(run_id, stage_id, role),
-                    )
-                    self._cost_tracker.record_result(role, result)
-                    suffix = self._fanout_suffix.get(role, 0) + 1
-                    self._fanout_suffix[role] = suffix
-                    self.ws.write_output(run_id, stage_id, f"{role}_r{suffix}", result.output)
-                    self.ws.write_agent_meta(run_id, stage_id, f"{role}_r{suffix}",
-                                             self._agent_meta(result))
-                    yield from self._flush_progress(run_id, stage_id)
-            yield {'type': 'progress', 'stage': stage_id,
-                   'msg': f'  done: {sum(1 for r in all_results if r.get("exit_code",0)==0 or "path" in r)}/{len(all_results)} actions OK'}
-        else:
-            # Sequential: each agent builds on previous
-            for i, agent_cfg in enumerate(agents_cfg):
-                role = agent_cfg['role']
-
-                # Mode 1: Manifest actions (pre-built by Orchestrator, no LLM call)
-                # Bypass for codegen-writers — forces LLM to write real code
-                if 'actions' in agent_cfg and 'codegen-writer' not in role:
-                    yield {'type': 'progress', 'stage': stage_id,
-                           'msg': f'  executing {len(agent_cfg["actions"])} manifest actions...'}
-                    results = self._exec_manifest_actions(
-                        agent_cfg['actions'], project_path
-                    )
-                    for a in results:
-                        status = 'OK' if a.get('exit_code', 0) == 0 else 'FAIL'
-                        yield {'type': 'progress', 'stage': stage_id,
-                               'msg': f'    {a.get("type","?")}: {a.get("path","") or a.get("command","")} [{status}]'}
-                        if a.get('stderr'):
-                            yield {'type': 'progress', 'stage': stage_id,
-                                   'msg': f'      stderr: {a["stderr"][:200]}'}
-                    continue
-
-                # Mode 2: Dispatch agent, parse actions from output
-                defn = load_agent(role)
-                tier = agent_cfg.get('model_assignment', {}).get('tier', 'balanced')
-
-                # Inject project context: directory path and file listing
-                project_context = f"## Project Location\nProject root: {project_path}\n"
-                try:
-                    files = list(project_path.rglob('*'))
-                    ignore = {'target', '.git', '.cargo', '_workspace'}
-                    file_list = []
-                    for f in sorted(files):
-                        if f.is_file() and not any(p in ignore for p in f.parts):
-                            rel = f.relative_to(project_path)
-                            file_list.append(f"  {rel}  ({f.stat().st_size} bytes)")
-                    if file_list:
-                        project_context += "## Project Files\n"
-                        project_context += "\n".join(file_list) + "\n"
-                except Exception:
-                    pass
-
-                yield {'type': 'progress', 'stage': stage_id,
-                       'msg': f'Running {role}... ({i+1}/{len(agents_cfg)})'}
-
-                compiler_context = (project_context + "\n" + (prev_output or '')).strip()
-
-                result = self.dispatcher.run_agent_with_tools(
-                    defn, agent_cfg['goal'],
-                    context=compiler_context,
-                    tier=tier,
-                    tools=TOOL_SCHEMAS,
-                    project_path=str(project_path),
-                    workspace_dir=str(self.ws.base / run_id) if self.run_id else None,
-                    max_cost_usd=defn.execution.max_cost_usd,
-                    auto_git=defn.execution.auto_git_commit,
-                    max_tool_rounds=defn.execution.max_tool_rounds,
-                    progress_callback=self._make_progress_callback(run_id, stage_id, role),
-                )
-                self._cost_tracker.record_result(role, result)
-                self.ws.write_output(run_id, stage_id, role, result.output)
-                self.ws.write_agent_meta(run_id, stage_id, role,
-                                         self._agent_meta(result))
-                yield from self._flush_progress(run_id, stage_id)
-                prev_output = result.output
-
-        yield {'type': 'progress', 'stage': stage_id, 'msg': 'codegen complete'}
-
-    @staticmethod
-    def _exec_manifest_actions(actions: list[dict], project_path: Path) -> list[dict]:
-        """Execute actions from manifest JSON (pre-built by Orchestrator).
-
-        Manifest action format:
-          {"action": "write_file", "file_path": "...", "content": "..."}
-          {"action": "run", "command": "..."}
-
-        Returns list of {type, path|command, exit_code, stdout, stderr}.
-        """
-        import subprocess as _sp
-        results = []
-        for act in actions:
-            try:
-                action_type = act.get('action', '')
-                if action_type == 'write_file':
-                    file_path = project_path / act['file_path']
-                    content = act.get('content', '')
-                    file_path.parent.mkdir(parents=True, exist_ok=True)
-                    file_path.write_text(content)
-                    results.append({'type': 'write_file', 'path': str(file_path)})
-
-                elif action_type == 'run':
-                    cmd = act.get('command', '')
-                    if not cmd:
-                        continue
-                    # Fix wrong cd paths in generated commands
-                    import re as _re
-                    cmd = _re.sub(
-                        r'\bcd\s+(/[^\s;|&]+)',
-                        lambda m: f'cd {project_path}' if not Path(m.group(1)).exists() else m.group(0),
-                        cmd
-                    )
-                    sp = _sp.run(
-                        cmd, shell=True, capture_output=True, text=True,
-                        cwd=str(project_path), timeout=120,
-                    )
-                    results.append({
-                        'type': 'run', 'command': cmd,
-                        'stdout': sp.stdout[-500:], 'stderr': sp.stderr[-500:],
-                        'exit_code': sp.returncode,
-                    })
-
-                elif action_type == 'delete':
-                    target = project_path / act['file_path']
-                    if target.exists():
-                        if target.is_file():
-                            target.unlink()
-                        elif target.is_dir():
-                            import shutil
-                            shutil.rmtree(target)
-                        results.append({'type': 'delete', 'path': act['file_path']})
-
-                elif action_type == 'append_file':
-                    file_path = project_path / act['file_path']
-                    content = act.get('content', '')
-                    file_path.parent.mkdir(parents=True, exist_ok=True)
-                    with open(file_path, 'a') as f:
-                        f.write(content)
-                    results.append({'type': 'append_file', 'path': str(file_path)})
-
-            except Exception as e:
-                results.append({'type': 'error', 'action': action_type, 'error': str(e)})
-
-        return results
-
-    # ── Sub-agent progress callback ──
-
-    def _make_progress_callback(self, run_id: str, stage_id: str, role: str):
-        """Create a progress callback that appends events to the executor's buffer."""
-        if not hasattr(self, '_progress_buffer'):
-            self._progress_buffer: list[dict] = []
-        cb = _ProgressCallback(role, self._progress_buffer)
-        return cb
-
-    def _flush_progress(self, run_id: str, stage_id: str):
-        """Yield buffered progress events."""
-        if not hasattr(self, '_progress_buffer') or not self._progress_buffer:
-            return
-        total_tools = sum(1 for ev in self._progress_buffer if ev['event_type'] == 'tool_start')
-        yield {'type': 'progress', 'stage': stage_id,
-               'msg': f'  {self._progress_buffer[0]["role"]}: {total_tools} tool calls across {self._progress_buffer[-1]["round_num"]} rounds'}
-
-        # Log tool details to log file
-        log_lines = []
-        for ev in self._progress_buffer:
-            if ev['event_type'] == 'tool_start':
-                log_lines.append(f"  [{ev['round_num']}.{ev['tool_num']}] → {ev['msg']}")
-            elif ev['event_type'] == 'tool_result':
-                log_lines.append(f"  [{ev['round_num']}.{ev['tool_num']}] ← {ev['msg'][:150]}")
-            elif ev['event_type'] == 'budget_exhausted':
-                log_lines.append(f"  ⛔ {ev['msg']}")
-        log_path = self.ws.base / run_id / stage_id / '_tool_log.txt'
-        log_path.parent.mkdir(parents=True, exist_ok=True)
-        log_path.write_text('\n'.join(log_lines))
-        self._progress_buffer.clear()
+            pass  # Simplified handling
 
 
-def _load_previous_context_fast(project_dir: str | None) -> str:
-    """Standalone function to quickly load previous orbuz run context from a project.
+if __name__ == "__main__":
+    from orbuz.llm.client import LLMClient
+    from orbuz.schema.plan import PlanJSON
 
-    Used by the CLI to inject prior work context into the orchestrator prompt.
-    """
-    if not project_dir:
-        return ""
-    workspace = Path(project_dir) / "_workspace"
-    if not workspace.exists():
-        return ""
+    llm = LLMClient({"balanced": "mock", "cheap": "mock"}, mock=True)
+    plan = PlanJSON.sample().model_dump()
+    exe = Executor(plan, llm_client=llm)
 
-    summaries = sorted(
-        workspace.glob("*/summary.md"),
-        key=lambda p: p.stat().st_mtime,
-        reverse=True,
-    )
-    if not summaries:
-        return ""
-
-    latest = summaries[0]
-    run_id = latest.parent.name
-    content = latest.read_text().strip()
-    if len(content) > 3000:
-        content = content[:3000] + "\n...(truncated)"
-
-    lines = [
-        "## Previous Work Summary (auto-detected)",
-        f"**Previous Run:** `{run_id}`",
-        "",
-        content,
-    ]
-
-    if len(summaries) > 1:
-        lines.append("\n### Older Runs")
-        for s in summaries[1:4]:
-            rid = s.parent.name
-            preview = s.read_text().strip()[:150].replace("\n", " ")
-            lines.append(f"- `{rid}` — {preview}...")
-
-    return "\n".join(lines)
-
-
-class _ProgressCallback:
-    """Simple callable that stores progress events in a buffer."""
-
-    def __init__(self, role: str, buffer: list[dict]):
-        self._role = role
-        self._buffer = buffer
-
-    def __call__(self, agent_name: str, round_num: int, tool_num: int,
-                 event_type: str, msg: str):
-        self._buffer.append({
-            'role': self._role,
-            'round_num': round_num,
-            'tool_num': tool_num,
-            'event_type': event_type,
-            'msg': msg,
-        })
+    for event in exe.run():
+        if event["type"] == "progress":
+            print(f"  📡 {event}")
+        elif event["type"] == "checkpoint":
+            print(f"\n⏸  Checkpoint: {event['stage_name']}")
+            exe.continue_with({"action": "continue"})
+        elif event["type"] == "done":
+            print(f"\n✅ Done: {event['output_path']}")
+        elif event["type"] == "waiting":
+            break  # Simplified: synchronous mode just exits

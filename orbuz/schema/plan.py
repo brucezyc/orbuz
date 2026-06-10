@@ -11,12 +11,33 @@ class PlanModelAssignment(BaseModel):
     reentrant: bool = False
 
 
+class PlanErrorHandler(BaseModel):
+    """Error recovery configuration for a pipeline agent.
+
+    on_fail:  retry   → retry the same agent (or retry_role) up to max_retries
+              escalate → switch to fallback_role agent for one attempt
+              route    → evaluate all retry_role attempts, then escalate
+    pass_condition:   'exit_code == 0' | 'contains:SUCCESS' | '' (always pass)
+    run_command:      optional shell command to execute after agent output
+                      (e.g. 'cargo check 2>&1', 'python -m pytest'). stdout
+                      is injected into next attempt's context.
+    """
+    on_fail: str = "retry"
+    max_retries: int = 3
+    retry_role: str = ""
+    fallback_role: str = ""
+    pass_condition: str = "exit_code == 0"
+    run_command: str = ""
+    input_from_role: str = ""
+
+
 class PlanAgent(BaseModel):
     role: str
     model_assignment: PlanModelAssignment = PlanModelAssignment()
     rationale: str = ""
     goal: str = ""
     output: str = "output.md"
+    error_handler: PlanErrorHandler = PlanErrorHandler()
 
 
 class PlanMerge(BaseModel):
