@@ -15,7 +15,6 @@ import json
 import re
 from datetime import datetime, timezone
 from pathlib import Path
-from difflib import SequenceMatcher
 from orbuz.schema.plan import PlanJSON, ReconSummary
 from orbuz.schema.agent import load_index, load_agent
 from orbuz.llm.client import LLMClient
@@ -211,20 +210,10 @@ class Orchestrator:
             stages_count = len(plan.plan["stages"])
             print(f"  ✅ Plan generated successfully: {stages_count} stage(s)")
 
-            # ── Validate all agent roles exist in agent library ──
-            replacements = self._validate_agent_roles(plan)
-            if replacements:
-                print(f"  🔄 Agent role replacements:")
-                for orig, new in replacements:
-                    print(f"    {orig} → {new}")
-                # Update the plan stages in-place
-                for stage in plan.plan["stages"]:
-                    for agent_cfg in stage.get("agents", []):
-                        role = agent_cfg["role"]
-                        for orig, new in replacements:
-                            if role == orig:
-                                agent_cfg["role"] = new
-                                break
+            # ── Ensure all agent roles have definitions ──
+            new_count = self._ensure_agent_definitions(plan)
+            if new_count > 0:
+                print(f"  🆕 {new_count} new agent definition(s) auto-generated")
 
             return plan
 
@@ -233,59 +222,165 @@ class Orchestrator:
             print(f"  → Falling back to sample plan")
             return self._fallback_plan(workflow_name, topic, project_dir)
 
-    # ── Agent role validation ──
+    # ── Agent auto-creation ──
 
-    def _validate_agent_roles(self, plan: PlanJSON) -> list[tuple[str, str]]:
-        """Check all agent roles in the plan exist in agent library. Return [(old, new)] replacements."""
+    def _ensure_agent_definitions(self, plan: PlanJSON) -> int:
+        """Auto-generate YAML definitions for agent roles that don't exist yet.
+        Returns count of new agents created.
+        Returns:
+            int: number of new agents created
+        """
+        import yaml
+
         index = load_index(self.agent_dir)
         existing = {a.name for a in index.agents}
-        replacements: list[tuple[str, str]] = []
+        new_count = 0
+        created_roles: list[str] = []
 
         for stage in plan.plan.get("stages", []):
             for agent_cfg in stage.get("agents", []):
                 role = agent_cfg.get("role", "")
                 if not role or role in existing:
                     continue
-                # Role doesn't exist — find nearest match
-                best = self._find_closest_agent(role, existing)
-                if best:
-                    print(f"  ⚠️ Agent '{role}' not found → using nearest match '{best}'")
-                else:
-                    print(f"  ⚠️ Agent '{role}' not found and no close match — using 'debugger' as fallback")
-                    best = "debugger"
-                replacements.append((role, best))
-        return replacements
+                # Check if file already exists (might not be in index yet)
+                agent_file = self.agent_dir / f"{role}.yaml"
+                if agent_file.exists():
+                    # Register in index if missing
+                    self._register_in_index(role)
+                    continue
+
+                # Same agent with different name? Check close similarity
+                close_match = self._has_close_equivalent(role, existing)
+                if close_match:
+                    print(f"  ⚠️ Agent '{role}' is very similar to '{close_match}' — keeping as-is")
+                    print(f"  ℹ️  Generated '{role}' as a new agent (closest existing: {close_match})")
+
+                # Auto-generate the YAML definition
+                self._generate_agent_yaml(role, agent_cfg)
+                self._register_in_index(role)
+                existing.add(role)
+                created_roles.append(role)
+                new_count += 1
+                print(f"  🆕 Generated agent definition: {role}.yaml")
+
+        if new_count > 0:
+            plan.recon_summary.new_agents_created = new_count
+            plan.agent_registry_updates = [{"name": r} for r in created_roles]
+
+        return new_count
 
     @staticmethod
-    def _find_closest_agent(name: str, existing: set[str]) -> str | None:
-        """Find the closest matching agent name by token similarity."""
-        if not existing:
-            return None
+    def _has_close_equivalent(name: str, existing: set[str]) -> str | None:
+        """Check if agent name is nearly identical to an existing one."""
+        from difflib import SequenceMatcher
         name_lower = name.lower()
-        # Exact substring match first
         for e in existing:
-            if name_lower in e.lower() or e.lower() in name_lower:
+            if e.lower() == name_lower:
                 return e
-        # Token overlap: check for shared meaningful tokens (split on - and _)
-        name_tokens = set(name_lower.replace("-", "_").split("_"))
-        best_score = 0
-        best_match = None
-        for e in existing:
+            if SequenceMatcher(None, name_lower, e.lower()).ratio() > 0.7:
+                return e
+            # Token overlap
+            name_tokens = set(name_lower.replace("-", "_").split("_"))
             e_tokens = set(e.lower().replace("-", "_").split("_"))
-            overlap = len(name_tokens & e_tokens)
-            if overlap > best_score:
-                best_score = overlap
-                best_match = e
-        if best_score > 0:
-            return best_match
-        # Fallback: SequenceMatcher
-        best_score = 0
-        for e in existing:
-            score = SequenceMatcher(None, name_lower, e.lower()).ratio()
-            if score > best_score:
-                best_score = score
-                best_match = e
-        return best_match if best_score > 0.3 else None
+            if len(name_tokens & e_tokens) >= 2 and len(name_tokens) >= 2:
+                return e
+        return None
+
+    def _generate_agent_yaml(self, role: str, agent_cfg: dict) -> None:
+        """Generate a minimal but functional YAML definition for a new agent role."""
+        import yaml
+
+        # Infer toolsets from role name
+        toolsets = self._infer_toolsets(role)
+        goal = agent_cfg.get("goal", "")
+        rationale = agent_cfg.get("rationale", "")
+        description = rationale or f"Agent for {goal[:80]}" if goal else f"{role} agent (auto-generated)"
+
+        defn = {
+            "name": role,
+            "version": "1.0.0",
+            "description": description,
+            "summary": f"{role.replace('-', ' ').title()}: {goal[:100] if goal else 'auto-generated agent'}",
+            "toolsets": toolsets,
+            "skills": [],
+            "principles": [
+                f"Use available tools to accomplish the goal: {goal[:60] if goal else 'execute tasks'}",
+                "Report progress clearly",
+                "Ask for clarification if stuck",
+            ],
+            "constraints": [
+                "Do not remove or modify files outside the project directory",
+            ],
+            "output": {
+                "format": "markdown",
+                "structure": ["summary", "actions_taken", "results"],
+            },
+            "mode": {"execution": "subagent"},
+            "model_hint": {"tier": "balanced", "fallback": "quality"},
+            "execution": {
+                "max_tool_rounds": 15,
+                "max_cost_usd": 0.0,
+                "auto_git_commit": False,
+                "retry_on_failure": "never",
+            },
+        }
+
+        # Write YAML
+        agent_file = self.agent_dir / f"{role}.yaml"
+        agent_file.parent.mkdir(parents=True, exist_ok=True)
+        with open(agent_file, "w") as f:
+            yaml.dump(defn, f, default_flow_style=False, allow_unicode=True, sort_keys=False)
+
+    @staticmethod
+    def _infer_toolsets(role: str) -> list[str]:
+        """Infer appropriate toolsets from the agent role name."""
+        role_lower = role.lower()
+        toolsets = ["terminal"]
+
+        codegen_keywords = ["codegen", "writer", "compiler", "developer", "coder"]
+        debug_keywords = ["debug", "diagnostic", "inspect", "audit"]
+        research_keywords = ["research", "search", "investigat", "analyst", "fact"]
+        web_keywords = ["web", "scrape", "fetch", "api"]
+        file_keywords = ["write", "read", "file", "patch", "edit", "setup"]
+
+        if any(k in role_lower for k in codegen_keywords):
+            toolsets = ["terminal", "file"]
+        elif any(k in role_lower for k in debug_keywords):
+            toolsets = ["terminal", "file"]
+        elif any(k in role_lower for k in research_keywords):
+            toolsets = ["terminal", "web"]
+        elif any(k in role_lower for k in web_keywords):
+            toolsets = ["terminal", "web"]
+        elif any(k in role_lower for k in file_keywords):
+            toolsets = ["terminal", "file"]
+
+        return toolsets
+
+    def _register_in_index(self, role: str) -> None:
+        """Add the agent to index.yaml if not already present."""
+        import yaml
+
+        index_file = self.agent_dir / "index.yaml"
+        if not index_file.exists():
+            return
+
+        with open(index_file) as f:
+            index = yaml.safe_load(f) or {"agents": []}
+
+        for entry in index.get("agents", []):
+            if entry.get("name") == role:
+                return  # already in index
+
+        # Add entry
+        index.setdefault("agents", []).append({
+            "name": role,
+            "summary": f"{role.replace('-', ' ').title()}: auto-generated agent",
+            "tags": [role.split("-")[0]] if "-" in role else [role],
+            "file": f"{role}.yaml",
+        })
+
+        with open(index_file, "w") as f:
+            yaml.dump(index, f, default_flow_style=False, allow_unicode=True, sort_keys=False)
 
     # ── JSON parsing helpers ──
 
