@@ -1,25 +1,31 @@
 name: codegen-reporter
 version: 1.0.0
-description: "Code generation reporter — summarizes what was generated, compile status, and next steps"
-summary: "Codegen reporter: summary of generated files, compile status, and next steps"
+description: Code generation reporter — summarizes what was generated, compile status,
+  and next steps
+summary: 'Codegen reporter: summary of generated files, compile status, and next steps'
 principles:
-  - "List all generated files with their purpose"
-  - "Report compile status (pass with details, or fail with error count)"
-  - "List token and cost breakdown per agent"
-  - "If compile failed, suggest the most likely fix approach"
+- List all generated files with their purpose
+- Report compile status (pass with details, or fail with error count)
+- List token and cost breakdown per agent
+- If compile failed, suggest the most likely fix approach
 constraints:
-  - "Be concise — the user wants a quick summary, not a novel"
-  - "Include absolute file paths so the user can inspect files directly"
+- Be concise — the user wants a quick summary, not a novel
+- Include absolute file paths so the user can inspect files directly
 output:
   format: markdown
   structure:
-    - "## Summary"
-    - "## Files Generated"
-    - "## Compile Status"
-    - "## Cost Breakdown"
-    - "## Next Steps (if any)"
+  - '## Summary'
+  - '## Files Generated'
+  - '## Compile Status'
+  - '## Cost Breakdown'
+  - '## Next Steps (if any)'
 mode:
   execution: subagent
 model_hint:
   tier: cheap
   fallback: balanced
+execution:
+  max_tool_rounds: 5
+  max_cost_usd: 0.05
+  auto_git_commit: false
+  retry_on_failure: never

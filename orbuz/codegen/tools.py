@@ -213,6 +213,44 @@ UPDATE_CHECKPOINT_SCHEMA = {
     },
 }
 
+VERIFY_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "verify",
+        "description": (
+            "Run a verification command (compile, lint, test) and return "
+            "structured error output. Supports Rust (cargo check/build/test), "
+            "Python (pytest), and generic file:line:col error formats. "
+            "Use this INSTEAD of manually running terminal('cargo check') "
+            "when you need structured error parsing — the result includes "
+            "per-file error lists that make fixing faster."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "command": {
+                    "type": "string",
+                    "description": "Shell command to run (e.g. 'cargo check', 'python -m pytest')"
+                },
+                "cwd": {
+                    "type": "string",
+                    "description": "Working directory (default: project root)"
+                },
+                "language": {
+                    "type": "string",
+                    "enum": ["rust", "python", "cpp", "generic"],
+                    "description": "Language for error parsing. Auto-detected from command if omitted."
+                },
+                "max_attempts": {
+                    "type": "integer",
+                    "description": "Max retry attempts (default: 1). >1 auto-retries on failure.",
+                },
+            },
+            "required": ["command"],
+        },
+    },
+}
+
 # All tool schemas for codegen sub-agents
 TOOL_SCHEMAS: list[dict] = [
     WRITE_FILE_SCHEMA,
@@ -221,6 +259,7 @@ TOOL_SCHEMAS: list[dict] = [
     PATCH_SCHEMA,
     SEARCH_SCHEMA,
     UPDATE_CHECKPOINT_SCHEMA,
+    VERIFY_SCHEMA,
 ]
 
 # ── Dispatch ──
@@ -256,6 +295,8 @@ def dispatch(
         return _patch(args, pp)
     elif tool_name == "search_files":
         return _search_files(args, pp)
+    elif tool_name == "verify":
+        return _verify(args, pp)
     else:
         return _hermes_fallback(tool_name, args)
 
@@ -416,6 +457,48 @@ def _search_files(args: dict, project_path: str) -> str:
             return json.dumps({"error": f"search failed: {e}"})
     except Exception as e:
         return json.dumps({"error": str(e)})
+
+
+def _verify(args: dict, project_path: str) -> str:
+    """Run a verification command with structured error parsing."""
+    command = args.get("command", "")
+    cwd = args.get("cwd") or project_path
+    language = args.get("language", "")
+    max_attempts = min(args.get("max_attempts", 1), 5)
+
+    if not command:
+        return json.dumps({"error": "command is required"})
+
+    # Import feedback_loop (built-in orbuz module)
+    try:
+        from orbuz.codegen.feedback_loop import FeedbackLoop
+    except ImportError:
+        # Fallback: raw terminal
+        return json.dumps({"error": "feedback_loop module not available, use terminal tool instead"})
+
+    loop = FeedbackLoop(
+        command=command,
+        cwd=cwd,
+        max_attempts=max_attempts,
+        language=language or None,
+    )
+    result = None
+    for attempt in range(max(1, max_attempts)):
+        result = loop.run()
+        if result.success:
+            break
+
+    if result is None:
+        return json.dumps({"error": "verification did not run", "ok": False})
+
+    return json.dumps({
+        "ok": result.success,
+        "exit_code": 0 if result.success else -1,
+        "attempts": result.attempt_count,
+        "error_summary": result.error_summary if not result.success else "",
+        "n_errors": len(result.errors),
+        "output_tail": result.output[-2000:] if result.output else "",
+    })
 
 
 # ── Hermes fallback ──

@@ -1,32 +1,38 @@
 name: paper-analyst
 version: 1.0.0
-description: "Academic paper analysis and literature review"
-summary: "Academic paper analysis: methods → results → innovations → limitations → reproducibility suggestions"
+description: Academic paper analysis and literature review
+summary: 'Academic paper analysis: methods → results → innovations → limitations →
+  reproducibility suggestions'
 toolsets:
-  - web
-  - terminal
+- web
+- terminal
 skills:
-  - url-fetch
-  - arxiv
+- url-fetch
+- arxiv
 principles:
-  - "Read the abstract and conclusion first to understand the full picture"
-  - "Focus on: research question, method, dataset, results, limitations"
-  - "Evaluate methodological innovation and practical impact"
-  - "Note whether code/data are open-sourced"
-  - "Compare methods and results with related papers"
+- Read the abstract and conclusion first to understand the full picture
+- 'Focus on: research question, method, dataset, results, limitations'
+- Evaluate methodological innovation and practical impact
+- Note whether code/data are open-sourced
+- Compare methods and results with related papers
 constraints:
-  - "Maximum 3 papers per analysis pass"
-  - "Rely primarily on the paper's own content — do not over-extrapolate"
+- Maximum 3 papers per analysis pass
+- Rely primarily on the paper's own content — do not over-extrapolate
 output:
   format: markdown
   structure:
-    - "## Paper Metadata (Title / Authors / Year / Venue)"
-    - "## Research Question"
-    - "## Method"
-    - "## Results"
-    - "## Innovations"
-    - "## Limitations"
-    - "## Comparison with Related Work"
-    - "## Reproducibility Suggestions"
+  - '## Paper Metadata (Title / Authors / Year / Venue)'
+  - '## Research Question'
+  - '## Method'
+  - '## Results'
+  - '## Innovations'
+  - '## Limitations'
+  - '## Comparison with Related Work'
+  - '## Reproducibility Suggestions'
 mode:
   execution: subagent
+execution:
+  max_tool_rounds: 5
+  max_cost_usd: 0.1
+  auto_git_commit: false
+  retry_on_failure: always

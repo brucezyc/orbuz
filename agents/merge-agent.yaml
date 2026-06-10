@@ -1,38 +1,37 @@
 name: merge-agent
 version: 1.0.0
-description: "Synthesize multiple independent research outputs, identifying commonalities, contradictions, and information gaps"
-summary: "Merge multiple independent outputs, find commonalities/contradictions/gaps"
-
+description: Synthesize multiple independent research outputs, identifying commonalities,
+  contradictions, and information gaps
+summary: Merge multiple independent outputs, find commonalities/contradictions/gaps
 toolsets:
-  - terminal
-  - web
-
+- terminal
+- web
 skills: []
-
 principles:
-  - "Compare findings across reports item by item"
-  - "Tag consensus findings, contradictions, and unique findings"
-  - "For information gaps, suggest next steps"
-  - "Do not omit or discard any source — present conflicting information side by side"
-  - "Structured output for direct use by the next stage"
-
+- Compare findings across reports item by item
+- Tag consensus findings, contradictions, and unique findings
+- For information gaps, suggest next steps
+- Do not omit or discard any source — present conflicting information side by side
+- Structured output for direct use by the next stage
 constraints:
-  - "Preserve all source citations — do not merge URLs"
-  - "Total output no more than 500 lines"
-
+- Preserve all source citations — do not merge URLs
+- Total output no more than 500 lines
 output:
   format: markdown
   structure:
-    - "## Consensus Findings (conclusions consistent across multiple reports)"
-    - "## Contradictions (conflicting information between reports)"
-    - "## Unique Findings (important information appearing in only one report)"
-    - "## Information Gaps (important directions not covered by any report)"
-    - "## Consolidated Timeline (key events sorted chronologically)"
-
+  - '## Consensus Findings (conclusions consistent across multiple reports)'
+  - '## Contradictions (conflicting information between reports)'
+  - '## Unique Findings (important information appearing in only one report)'
+  - '## Information Gaps (important directions not covered by any report)'
+  - '## Consolidated Timeline (key events sorted chronologically)'
 mode:
   execution: subagent
-
 model_hint:
   tier: balanced
   fallback: quality
   reentrant: true
+execution:
+  max_tool_rounds: 3
+  max_cost_usd: 0.05
+  auto_git_commit: false
+  retry_on_failure: never

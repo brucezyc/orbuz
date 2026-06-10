@@ -13,6 +13,8 @@ Execution patterns:
 """
 from __future__ import annotations
 import json
+import os
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from orbuz.core.dispatcher import Dispatcher, DispatcherResult, merge_dedup_findings
@@ -118,6 +120,15 @@ class Executor:
         self.run_id = run_id
         self.webhook_url = webhook_url
         self._fanout_suffix = {}
+        # Heartbeat tracking
+        self._last_webhook_ts = 0.0
+        self._heartbeat_interval = 300  # 5 min
+
+    def _maybe_heartbeat(self, run_id: str, stage_id: str = "", stage_name: str = ""):
+        """Emit heartbeat if silent for > heartbeat_interval seconds."""
+        if time.time() - self._last_webhook_ts > self._heartbeat_interval:
+            self._call_webhook(run_id, stage_id, stage_name, "running",
+                               event_type="heartbeat")
 
     # ── Main entry ──
 
@@ -226,6 +237,14 @@ class Executor:
             start_from = 0
             self.run_id = run_id
 
+        # ── Webhook: run_start ──
+        self._call_webhook(run_id, "", "orchestrator", "running",
+                           event_type="run_start", extra={
+                               "total_stages": len(stages),
+                               "plan_name": plan.get("workflow", {}).get("name",
+                                           plan.get("name", "unnamed")),
+                           })
+
         self.bus = MessageBus(
             workspace_dir=str(self.ws.base / run_id)
         )
@@ -246,10 +265,21 @@ class Executor:
 
             self.ws.set_current_stage(run_id, idx)
 
+            # ── Heartbeat ──
+            self._maybe_heartbeat(run_id, stage_id, stage.get("name", "?"))
+
+            # ── Webhook: stage_progress ──
+            self._call_webhook(run_id, stage_id, stage.get("name", stage.get("pattern", "?")),
+                               "running", event_type="stage_progress",
+                               extra={"stage_index": idx, "total_stages": len(stages)})
+
             # Validate dependencies
             for dep_id in stage.get("depends_on", []):
                 dep_status = self.ws.get_stage_status(run_id, dep_id)
                 if dep_status != "completed":
+                    self._call_webhook(run_id, stage_id, stage.get("name", "?"),
+                                       "failed", event_type="agent_error",
+                                       extra={"error": f"Dependency {dep_id} not completed ({dep_status})"})
                     yield {"type": "error", "msg": f"Dependency {dep_id} not completed (status={dep_status})"}
                     return
 
@@ -305,6 +335,12 @@ class Executor:
 
         yield {"type": "done", "run_id": run_id, "output_path": f"_workspace/{run_id}/deliver/",
                "cost_summary": cost_summary, "summary": summary_md}
+
+        # ── Webhook: run_complete ──
+        self._call_webhook(run_id, "", "orchestrator", "completed",
+                           event_type="run_complete",
+                           extra={"output_path": f"_workspace/{run_id}/deliver/",
+                                  "summary_md": summary_md[:500]})
 
     def continue_with(self, decision: dict):
         self._decision = decision
@@ -647,6 +683,17 @@ class Executor:
 
             combined_context = (project_ctx + "\n" + (prev_output or '')).strip()
 
+            exe_cfg = defn.execution
+            # ── Heartbeat ──
+            self._maybe_heartbeat(run_id, stage_id, agent_cfg["role"])
+
+            # ── Webhook: agent_progress (start) ──
+            stages_total = len(self.plan.get("plan", self.plan).get("stages",
+                             self.plan.get("stages", [])))
+            self._call_webhook(run_id, stage_id, agent_cfg["role"],
+                               "running", event_type="agent_progress",
+                               extra={"agent_index": i, "goal": agent_cfg.get("goal", "")[:80]})
+
             result = self.dispatcher.run_agent_with_tools(
                 defn, agent_cfg["goal"],
                 context=combined_context,
@@ -654,12 +701,25 @@ class Executor:
                 tools=TOOL_SCHEMAS if project_path else None,
                 project_path=str(project_path) if project_path else None,
                 workspace_dir=str(self.ws.base / run_id) if self.run_id else None,
+                max_cost_usd=exe_cfg.max_cost_usd,
+                auto_git=exe_cfg.auto_git_commit,
+                max_tool_rounds=exe_cfg.max_tool_rounds,
             )
             if not result.success:
                 result = self.dispatcher.handle_failure(defn, agent_cfg["goal"],
                                                          prev_output, result, tier,
                                                          tools=TOOL_SCHEMAS if project_path else None,
                                                          project_path=str(project_path) if project_path else None)
+                # ── Webhook: agent_error ──
+                if not result.success:
+                    self._call_webhook(run_id, stage_id, agent_cfg["role"],
+                                       "failed", event_type="agent_error",
+                                       extra={"error": result.error[:200] if result.error else ""})
+
+            # ── Webhook: budget_exhausted ──
+            if result.output and "Budget exhausted" in result.output:
+                self._call_webhook(run_id, stage_id, agent_cfg["role"],
+                                   "completed", event_type="budget_exhausted")
             self._cost_tracker.record_result(agent_cfg["role"], result)
             self.ws.write_output(run_id, stage_id, agent_cfg["role"], result.output)
             self.ws.write_agent_meta(run_id, stage_id, agent_cfg["role"],
@@ -759,38 +819,110 @@ class Executor:
         return CommunicationSpec()
 
     def _call_webhook(self, run_id: str, stage_id: str, stage_name: str,
-                      status: str, summary: dict | None = None):
-        """POST stage status to webhook URL. Uses urllib (stdlib, zero deps)."""
+                      status: str, summary: dict | None = None,
+                      event_type: str = "stage_complete", extra: dict | None = None):
+        """Send a webhook notification.
+
+        event_type: run_start | stage_progress | stage_complete | agent_progress
+                    | agent_error | budget_exhausted | heartbeat | run_complete
+        webhook_url can be:
+          - http://...      → HTTP POST (existing behavior)
+          - tg:TOKEN:CHAT   → Telegram message (no external server needed)
+        """
         if not self.webhook_url:
             return
+        self._last_webhook_ts = time.time()
+
+        payload = {
+            "event": event_type,
+            "run_id": run_id,
+            "stage_id": stage_id,
+            "stage_name": stage_name,
+            "status": status,
+            "summary": summary or {},
+            **(extra or {}),
+        }
+        cost = self._cost_tracker.summary() if event_type in ("run_complete", "budget_exhausted") else {}
+        if cost:
+            payload["cost"] = cost
+
+        # ── Telegram transport ──
+        if self.webhook_url.startswith("tg:"):
+            parts = self.webhook_url[3:].split(":", 1)
+            if len(parts) == 2:
+                token, chat_id = parts
+                self._send_telegram(token, chat_id, payload)
+            return
+
+        # ── HTTP POST transport ──
         try:
             import urllib.request
             import os
             import hmac
             import hashlib
-            raw_payload = json.dumps({
-                "run_id": run_id,
-                "stage_id": stage_id,
-                "stage_name": stage_name,
-                "status": status,
-                "summary": summary or {},
-            })
-            payload = raw_payload.encode()
+            raw = json.dumps(payload)
+            data = raw.encode()
             headers = {"Content-Type": "application/json"}
             secret = os.environ.get("ORBUZ_WEBHOOK_SECRET", "")
             if secret:
-                sig = hmac.new(secret.encode(), payload, hashlib.sha256).hexdigest()
+                sig = hmac.new(secret.encode(), data, hashlib.sha256).hexdigest()
                 headers["X-Hub-Signature-256"] = f"sha256={sig}"
             req = urllib.request.Request(
-                self.webhook_url,
-                data=payload,
-                headers=headers,
-                method="POST",
+                self.webhook_url, data=data, headers=headers, method="POST",
             )
             urllib.request.urlopen(req, timeout=10)
         except Exception as e:
-            # Webhook is best-effort; don't block execution
             print(f"  [webhook] {e}")
+
+    def _send_telegram(self, token: str, chat_id: str, payload: dict):
+        """Send a formatted Telegram message from a webhook payload."""
+        import urllib.request
+        event = payload.get("event", "?")
+        run_id = payload.get("run_id", "")[:8]
+        stage = payload.get("stage_name", "") or payload.get("stage_id", "")
+
+        emoji = {
+            "run_start": "🚀", "stage_progress": "⏳", "stage_complete": "✅",
+            "agent_progress": "🤖", "agent_error": "❌", "budget_exhausted": "💰",
+            "heartbeat": "💓", "run_complete": "🎉",
+        }.get(event, "ℹ️")
+
+        lines = [f"{emoji} **orbuz {event.replace('_', ' ').title()}**"]
+        lines.append(f"Run: `{run_id}`")
+        if stage:
+            lines.append(f"Stage: `{stage}`")
+        summary = payload.get("summary", {})
+        if summary:
+            if isinstance(summary, dict):
+                for k, v in summary.items():
+                    if isinstance(v, (int, float)):
+                        lines.append(f"{k}: {v}")
+            elif isinstance(summary, str):
+                lines.append(summary[:200])
+        if payload.get("agent"):
+            lines.append(f"Agent: `{payload['agent']}`")
+        if payload.get("error"):
+            lines.append(f"Error: {payload['error'][:200]}")
+        cost = payload.get("cost", {})
+        if cost:
+            lines.append(f"Cost: ${cost.get('total_cost_usd', 0):.4f}")
+        if payload.get("output_path"):
+            lines.append(f"Output: `{payload['output_path']}`")
+
+        text = "\n".join(lines)
+        # Telegram API limit: 4096 chars
+        text = text[:4000]
+        try:
+            url = f"https://api.telegram.org/bot{token}/sendMessage"
+            params = json.dumps({
+                "chat_id": chat_id, "text": text,
+                "parse_mode": "Markdown", "disable_web_page_preview": True,
+            }).encode()
+            req = urllib.request.Request(url, data=params,
+                headers={"Content-Type": "application/json"}, method="POST")
+            urllib.request.urlopen(req, timeout=10)
+        except Exception as e:
+            print(f"  [tg] {e}")
 
     def _handle_checkpoint_decision(self, run_id, decision):
         action = decision.get("action", "continue")
@@ -873,6 +1005,9 @@ class Executor:
                         tools=TOOL_SCHEMAS,
                         project_path=str(project_path),
                         workspace_dir=str(self.ws.base / run_id) if self.run_id else None,
+                        max_cost_usd=defn.execution.max_cost_usd,
+                        auto_git=defn.execution.auto_git_commit,
+                        max_tool_rounds=defn.execution.max_tool_rounds,
                     )
                     self._cost_tracker.record_result(role, result)
                     suffix = self._fanout_suffix.get(role, 0) + 1
@@ -936,6 +1071,9 @@ class Executor:
                     tools=TOOL_SCHEMAS,
                     project_path=str(project_path),
                     workspace_dir=str(self.ws.base / run_id) if self.run_id else None,
+                    max_cost_usd=defn.execution.max_cost_usd,
+                    auto_git=defn.execution.auto_git_commit,
+                    max_tool_rounds=defn.execution.max_tool_rounds,
                 )
                 self._cost_tracker.record_result(role, result)
                 self.ws.write_output(run_id, stage_id, role, result.output)

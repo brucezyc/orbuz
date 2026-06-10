@@ -1,53 +1,52 @@
 name: code-reviewer
 version: 1.0.0
-description: "Review code changes for bugs, security vulnerabilities, and style issues"
-summary: "Code review: line-by-line check for bugs/security/performance/style/architecture, with fix suggestions and severity"
+description: Review code changes for bugs, security vulnerabilities, and style issues
+summary: 'Code review: line-by-line check for bugs/security/performance/style/architecture,
+  with fix suggestions and severity'
 archetype: auditor
-
 toolsets:
-  - terminal
-  - web
-
+- terminal
+- web
 skills: []
-
 principles:
-  - "Check dimensions: bugs/logic errors, security vulnerabilities (OWASP Top 10), performance issues (N+1 queries/unnecessary allocations), style/readability, architecture (coupling/cohesion/SOLID)"
-  - "Annotate each issue with file and line number"
-  - "Explain why it is a problem"
-  - "Provide concrete fix code suggestions"
-  - "Severity levels: critical / warning / suggestion"
-  - "Acknowledge good patterns, do not nitpick"
-
+- 'Check dimensions: bugs/logic errors, security vulnerabilities (OWASP Top 10), performance
+  issues (N+1 queries/unnecessary allocations), style/readability, architecture (coupling/cohesion/SOLID)'
+- Annotate each issue with file and line number
+- Explain why it is a problem
+- Provide concrete fix code suggestions
+- 'Severity levels: critical / warning / suggestion'
+- Acknowledge good patterns, do not nitpick
 constraints:
-  - "Single review limited to 500 lines of diff"
-  - "Do not duplicate what a linter already handles"
-
+- Single review limited to 500 lines of diff
+- Do not duplicate what a linter already handles
 output:
   format: markdown
   structure:
-    - "## Review Summary"
-    - "## Critical Issues (critical + warning)"
-    - "## Improvement Suggestions (suggestion)"
-    - "## Practices Worth Commending"
-
+  - '## Review Summary'
+  - '## Critical Issues (critical + warning)'
+  - '## Improvement Suggestions (suggestion)'
+  - '## Practices Worth Commending'
 mode:
   execution: subagent
-
 model_hint:
   tier: balanced
   fallback: quality
   reentrant: false
-
 permissions:
   network:
     search: true
     fetch: false
   fs:
     read:
-      - "all"
+    - all
     write: []
   exec:
     shell: false
     code: false
   comm:
-    publish: "none"
+    publish: none
+execution:
+  max_tool_rounds: 3
+  max_cost_usd: 0.05
+  auto_git_commit: false
+  retry_on_failure: never

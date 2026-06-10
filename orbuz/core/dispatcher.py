@@ -305,6 +305,55 @@ class Dispatcher:
 
         return result
 
+    def _compress_messages(self, messages: list[dict], system: str, tier: str) -> list[dict]:
+        """Summarize oldest messages to keep conversation window manageable.
+
+        After many tool-calling rounds, the accumulated message history
+        grows large. This method takes the first N messages, sends them
+        to a cheap model for summarization, and replaces them with a
+        single compressed message.
+        """
+        if len(messages) < 6:
+            return messages
+
+        # Keep the last 4 exchanges (user+assistant+tool triples), summarize the rest
+        keep = messages[-4:]
+        to_compress = messages[:-4]
+
+        # Build a condensed summary from what's being removed
+        summary_parts = []
+        for msg in to_compress:
+            role = msg.get("role", "?")
+            content = str(msg.get("content", ""))[:100]
+            if role == "tool" and content:
+                # Tool results: just note what tool and approximate result
+                name = msg.get("name", "?")
+                summary_parts.append(f"[tool:{name}] {content[:80]}")
+            elif role == "assistant" and content:
+                tc = msg.get("tool_calls")
+                if tc:
+                    names = [t["function"]["name"] for t in tc]
+                    summary_parts.append(f"[assistant → {', '.join(names)}]")
+                else:
+                    summary_parts.append(f"[assistant] {content[:80]}")
+            elif role == "user" and content:
+                summary_parts.append(f"[user] {content[:80]}")
+
+        compressed = "\n".join(summary_parts)
+        # Truncate to ~500 chars
+        if len(compressed) > 500:
+            compressed = compressed[:497] + "..."
+
+        summary_msg = {
+            "role": "user",
+            "content": (
+                "[Previous conversation compressed]\n"
+                f"Summary of earlier rounds:\n{compressed}\n\n"
+                "Continue from where you left off. You still have all tools available."
+            ),
+        }
+        return [summary_msg] + keep
+
     def run_agent_with_tools(
         self, agent_def: AgentDefinition, goal: str,
         context: str = "", tier: str = "balanced",
@@ -313,6 +362,8 @@ class Dispatcher:
         project_path: str | None = None,
         workspace_dir: str | None = None,
         max_tool_rounds: int = 25,
+        max_cost_usd: float = 0.0,
+        auto_git: bool = False,
     ) -> DispatcherResult:
         """
         Run a sub-agent with native function calling (tool loop).
@@ -322,11 +373,14 @@ class Dispatcher:
           1. Calls the LLM with tool schemas
           2. If the LLM calls a tool, executes it and feeds the result back
           3. Repeats until the LLM responds with content (no tool calls)
+          4. Enforces budget (max_cost_usd), auto git commit, and max rounds
 
         Args:
             tools: OpenAI-format tool schemas (from orbuz.codegen.tools.TOOL_SCHEMAS)
             project_path: Project root for file/terminal tool resolution
             max_tool_rounds: Max tool-call iterations (safety limit)
+            max_cost_usd: Hard budget cap (0 = no limit)
+            auto_git: If True, auto git add+commit after each tool round
         """
         from orbuz.codegen.tools import dispatch as tool_dispatch
         from orbuz.codegen.tools import set_default_project_path
@@ -356,8 +410,13 @@ class Dispatcher:
         all_claims: list[dict] = []
         all_output_parts: list[str] = []  # accumulate content from all rounds
         tool_calls_made = 0
+        _compress_trigger = 15  # compress after 15 rounds
 
         for round_num in range(max_tool_rounds):
+            # ── Conversation compression: after 15+ rounds, summarize old history ──
+            if round_num >= _compress_trigger and round_num % 5 == 0:
+                messages = self._compress_messages(messages, system, tier)
+
             resp = self.llm.chat(
                 model_tier=tier,
                 system=system,
@@ -368,6 +427,20 @@ class Dispatcher:
             total_in_tokens += resp.input_tokens
             total_out_tokens += resp.output_tokens
             total_cost += resp.cost_usd
+
+            # ── Budget cap ──
+            if max_cost_usd > 0 and total_cost >= max_cost_usd:
+                return DispatcherResult(
+                    success=True,
+                    output="\n\n".join(all_output_parts) or f"[Budget exhausted: ${total_cost:.4f} >= ${max_cost_usd:.2f}]",
+                    claims=all_claims,
+                    tier_used=tier,
+                    model_used=model_name,
+                    tokens=total_in_tokens + total_out_tokens,
+                    input_tokens=total_in_tokens,
+                    output_tokens=total_out_tokens,
+                    cost_usd=total_cost,
+                )
 
             if not resp.success:
                 return DispatcherResult(
@@ -449,6 +522,18 @@ class Dispatcher:
                     "content": result,
                 })
 
+            # ── Auto git commit after tool round ──
+            if auto_git and project_path and tool_calls_made > 0:
+                import subprocess as _sp
+                _sp.run(
+                    ["git", "add", "-A"],
+                    cwd=project_path, capture_output=True, timeout=10,
+                )
+                _sp.run(
+                    ["git", "commit", "-m", f"orbuz auto: {agent_def.name} round {round_num+1}"],
+                    cwd=project_path, capture_output=True, timeout=10,
+                )
+
         # Exceeded max rounds — return whatever we have
         return DispatcherResult(
             success=True,
@@ -494,6 +579,8 @@ class Dispatcher:
         # Injects goal mode hint into system prompt by passing it as extra context
         goal_mode_context = (context + "\n\n" + self.GOAL_MODE_SYSTEM_HINT) if context else self.GOAL_MODE_SYSTEM_HINT
 
+        # Read execution config from agent definition
+        exe = agent_def.execution
         return self.run_agent_with_tools(
             agent_def=agent_def,
             goal=goal,
@@ -503,6 +590,8 @@ class Dispatcher:
             project_path=project_path,
             workspace_dir=workspace_dir,
             max_tool_rounds=max_tool_rounds,
+            max_cost_usd=exe.max_cost_usd,
+            auto_git=exe.auto_git_commit,
         )
 
     def handle_failure(self, agent_def: AgentDefinition, goal: str,
@@ -511,12 +600,29 @@ class Dispatcher:
                        tools: list[dict] | None = None,
                        project_path: str | None = None) -> DispatcherResult:
         """
-        Escalation chain:
-          1. Retry at a higher tier (e.g., cheap→balanced→quality)
-          2. If reentrant=True → flag for decomposition (handled by the caller)
-          3. All failed → return failure result
+        Escalation chain, respecting retry_on_failure:
+          1. If retry_on_failure="never" → return failure immediately
+          2. Retry at a higher tier (e.g., cheap→balanced→quality)
+          3. If reentrant=True → flag for decomposition (handled by the caller)
+          4. All failed → return failure result
         """
         hint = agent_def.model_hint
+        retry_mode = agent_def.execution.retry_on_failure
+
+        # ── "never" → bail immediately ──
+        if retry_mode == "never":
+            print(f"    ⏭️  {agent_def.name} failed, retry_on_failure=never, skipping")
+            return prev_result
+
+        # ── "compile" → only retry if error looks like a compile failure ──
+        if retry_mode == "compile":
+            err = (prev_result.error or "").lower()
+            out = (prev_result.output or "").lower()
+            if not any(kw in err or kw in out for kw in ["compile", "error", "error[", "could not", "expected"]):
+                print(f"    ⏭️  {agent_def.name} failed, retry_on_failure=compile but error not compile-related, skipping")
+                return prev_result
+
+        # ── Determine starting tier ──
         failed = failed_tier or prev_result.tier_used
         fallback = hint.fallback or "quality"
 

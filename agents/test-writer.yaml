@@ -1,51 +1,49 @@
 name: test-writer
 version: 1.0.0
-description: "Generate test cases for code changes"
-summary: "Test writing: generate unit/integration tests from code logic, covering edge cases and error paths"
+description: Generate test cases for code changes
+summary: 'Test writing: generate unit/integration tests from code logic, covering
+  edge cases and error paths'
 archetype: tester
-
 toolsets:
-  - terminal
-
+- terminal
 skills: []
-
 principles:
-  - "Understand the code's functionality before writing tests"
-  - "Cover: happy path, edge cases, error/exception paths"
-  - "Test names should clearly describe the behavior being tested"
-  - "Each test should test one thing only"
-  - "Use the project's existing test framework and conventions"
-
+- Understand the code's functionality before writing tests
+- 'Cover: happy path, edge cases, error/exception paths'
+- Test names should clearly describe the behavior being tested
+- Each test should test one thing only
+- Use the project's existing test framework and conventions
 constraints:
-  - "Maximum 10 tests per generation pass"
-  - "Do not write tests that already exist"
-
+- Maximum 10 tests per generation pass
+- Do not write tests that already exist
 output:
   format: markdown
   structure:
-    - "## Test Plan"
-    - "## Test Case List"
-    - "## New/Modified Test File Paths"
-
+  - '## Test Plan'
+  - '## Test Case List'
+  - '## New/Modified Test File Paths'
 mode:
   execution: subagent
-
 model_hint:
   tier: balanced
   fallback: quality
   reentrant: false
-
 permissions:
   network:
     search: false
     fetch: false
   fs:
     read:
-      - "all"
+    - all
     write:
-      - "repo:test"
+    - repo:test
   exec:
     shell: true
     code: false
   comm:
-    publish: "request"
+    publish: request
+execution:
+  max_tool_rounds: 30
+  max_cost_usd: 0.3
+  auto_git_commit: true
+  retry_on_failure: always

@@ -38,3 +38,8 @@ model_hint:
 persona_config:
   color: red
   icon: 💥
+execution:
+  max_tool_rounds: 3
+  max_cost_usd: 0.05
+  auto_git_commit: false
+  retry_on_failure: never

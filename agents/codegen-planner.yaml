@@ -1,23 +1,30 @@
 name: codegen-planner
 version: 1.0.0
-description: "Code generation planner — analyzes natural language goal, outputs structured YAML spec with file list, interface signatures, and dependency order"
-summary: "Codegen planner: goal → YAML spec with file list and cross-file types"
+description: Code generation planner — analyzes natural language goal, outputs structured
+  YAML spec with file list, interface signatures, and dependency order
+summary: 'Codegen planner: goal → YAML spec with file list and cross-file types'
 principles:
-  - "First understand the project type (binary/library), detect existing structure"
-  - "Design file architecture before writing — determine how files depend on each other"
-  - "For each file: define its purpose, public types, function signatures, and dependencies on other files"
-  - "Output a complete YAML spec that other agents can execute independently"
-  - "Include Cargo.toml dependencies (crate name + version) needed for the project"
+- First understand the project type (binary/library), detect existing structure
+- Design file architecture before writing — determine how files depend on each other
+- 'For each file: define its purpose, public types, function signatures, and dependencies
+  on other files'
+- Output a complete YAML spec that other agents can execute independently
+- Include Cargo.toml dependencies (crate name + version) needed for the project
 constraints:
-  - "Do not generate actual code — only the spec"
-  - "Do not modify existing files unless explicitly asked"
-  - "All function signatures must include parameter types and return types"
+- Do not generate actual code — only the spec
+- Do not modify existing files unless explicitly asked
+- All function signatures must include parameter types and return types
 output:
   format: yaml
   structure:
-    - "## Files (ordered by dependency)"
-    - "## Types / Interfaces (cross-file)"
-    - "## Dependencies"
-  notes: "Writers will output their files as ---actions--- blocks, not raw code"
+  - '## Files (ordered by dependency)'
+  - '## Types / Interfaces (cross-file)'
+  - '## Dependencies'
+  notes: Writers will output their files as ---actions--- blocks, not raw code
 mode:
   execution: subagent
+execution:
+  max_tool_rounds: 5
+  max_cost_usd: 0.1
+  auto_git_commit: false
+  retry_on_failure: never

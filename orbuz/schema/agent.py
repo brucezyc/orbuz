@@ -94,6 +94,23 @@ class MCPSpec(BaseModel):
     """Context section label. Defaults to tool name."""
 
 
+class ExecutionConfig(BaseModel):
+    """Per-agent execution control.
+    
+    Controls how many tool rounds, how much to spend, whether to auto-commit,
+    and how to handle failures — all settable per agent role so the orchestrator
+    doesn't waste budget on cheap reviewers and codegen writers don't run away.
+    """
+    max_tool_rounds: int = 25
+    """Max tool-call iterations before forced stop (safety valve)."""
+    max_cost_usd: float = 0.0
+    """Hard budget cap in USD. 0 = no limit."""
+    auto_git_commit: bool = False
+    """If True, auto git add+commit after each tool round that modifies files."""
+    retry_on_failure: str = "always"
+    """How to handle LLM/tool failures: 'never' (skip), 'compile' (retry only compile errors), 'always'."""
+
+
 class AgentDefinition(BaseModel):
     name: str
     version: str = "1.0.0"
@@ -107,6 +124,7 @@ class AgentDefinition(BaseModel):
     output: OutputSpec = OutputSpec()
     mode: dict = {"execution": "subagent"}
     model_hint: ModelHint = ModelHint()
+    execution: ExecutionConfig = ExecutionConfig()
     notes: str | None = None
 
     # ── MCP tool injection ──
