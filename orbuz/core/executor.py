@@ -14,12 +14,85 @@ All LLM calls go through Dispatcher + LLMClient, never directly to the API.
 Mock mode and real mode share the same code path.
 """
 
-from orbuz.core.dispatcher import Dispatcher, DispatcherResult
+from __future__ import annotations
+import json
+import os
+import time
+from dataclasses import dataclass, field
+from pathlib import Path
+from orbuz.core.dispatcher import Dispatcher, DispatcherResult, merge_dedup_findings
+from orbuz.core.selector import select_personas, describe_team
 from orbuz.core.shell_runner import ShellRunner, ShellResult
 from orbuz.agent.message import MessageBus, Message, CommunicationSpec
 from orbuz.workspace.manager import WorkspaceManager
 from orbuz.llm.client import LLMClient
 from orbuz.schema.agent import load_agent, ModelHint
+from orbuz.schema.finding import FindingSet, Finding, Severity, AutofixClass
+from orbuz.core.plugin import get_registry
+from orbuz.codegen.tools import TOOL_SCHEMAS
+
+
+_plugins = get_registry()
+
+
+# ── Cost Tracker ──
+
+@dataclass
+class CostTracker:
+    """Tracks token usage and cost across a workflow run."""
+    total_input_tokens: int = 0
+    total_output_tokens: int = 0
+    total_cost_usd: float = 0.0
+    total_duration_s: float = 0.0
+    per_agent: dict[str, dict] = field(default_factory=dict)
+
+    def record(self, agent_name: str, in_tokens: int, out_tokens: int,
+               cost_usd: float, duration_s: float = 0.0, model: str = ""):
+        self.total_input_tokens += in_tokens
+        self.total_output_tokens += out_tokens
+        self.total_cost_usd += cost_usd
+        self.total_duration_s += duration_s
+        if agent_name not in self.per_agent:
+            self.per_agent[agent_name] = {
+                "calls": 0, "input_tokens": 0, "output_tokens": 0,
+                "cost_usd": 0.0, "duration_s": 0.0, "models": [],
+            }
+        self.per_agent[agent_name]["calls"] += 1
+        self.per_agent[agent_name]["input_tokens"] += in_tokens
+        self.per_agent[agent_name]["output_tokens"] += out_tokens
+        self.per_agent[agent_name]["cost_usd"] += cost_usd
+        self.per_agent[agent_name]["duration_s"] += duration_s
+        if model and model not in self.per_agent[agent_name]["models"]:
+            self.per_agent[agent_name]["models"].append(model)
+
+    def record_result(self, agent_name: str, result: "DispatcherResult"):
+        """Record from a DispatcherResult."""
+        self.record(agent_name, result.input_tokens, result.output_tokens,
+                    result.cost_usd, result.duration_s, result.model_used)
+
+    def summary(self) -> dict:
+        return {
+            "total_cost_usd": round(self.total_cost_usd, 4),
+            "total_input_tokens": self.total_input_tokens,
+            "total_output_tokens": self.total_output_tokens,
+            "total_tokens": self.total_input_tokens + self.total_output_tokens,
+            "per_agent": self.per_agent,
+        }
+
+    def summary_str(self) -> str:
+        s = self.summary()
+        lines = [
+            f"Cost: ${s['total_cost_usd']:.4f} | "
+            f"Tokens: {s['total_tokens']:,} "
+            f"({s['total_input_tokens']:,} in / {s['total_output_tokens']:,} out)"
+        ]
+        by_cost = sorted(s["per_agent"].items(), key=lambda x: x[1]["cost_usd"], reverse=True)
+        for name, stats in by_cost[:5]:
+            lines.append(f"  {name}: ${stats['cost_usd']:.4f} ({stats['calls']} calls, "
+                         f"{stats['input_tokens']+stats['output_tokens']:,} tokens)")
+        if len(by_cost) > 5:
+            lines.append(f"  ... and {len(by_cost) - 5} more agents")
+        return "\n".join(lines)
 
 
 class Executor:
@@ -38,12 +111,15 @@ class Executor:
 
     MAX_ROUNDS = 3  # Multi-round fanout limit
 
-    def __init__(self, plan: dict, llm_client: LLMClient):
+    def __init__(self, plan: dict, llm_client: LLMClient, run_id: str | None = None,
+                 webhook_url: str | None = None, project_dir: str | None = None):
         self.plan = plan
         self.dispatcher = Dispatcher(llm_client)
         self.ws = WorkspaceManager()
-        self.bus = None  # Created in init_run
+        self.bus = None
         self._decision = None
+        self._cost_tracker = CostTracker()
+        self.run_id = run_id
 
     # ── Main entry ──
 
