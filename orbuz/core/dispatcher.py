@@ -364,6 +364,7 @@ class Dispatcher:
         max_tool_rounds: int = 25,
         max_cost_usd: float = 0.0,
         auto_git: bool = False,
+        progress_callback: callable = None,
     ) -> DispatcherResult:
         """
         Run a sub-agent with native function calling (tool loop).
@@ -430,6 +431,9 @@ class Dispatcher:
 
             # ── Budget cap ──
             if max_cost_usd > 0 and total_cost >= max_cost_usd:
+                if progress_callback:
+                    progress_callback(agent_def.name, round_num+1, tool_calls_made, "budget_exhausted",
+                                      f"${total_cost:.4f} >= ${max_cost_usd:.2f}")
                 return DispatcherResult(
                     success=True,
                     output="\n\n".join(all_output_parts) or f"[Budget exhausted: ${total_cost:.4f} >= ${max_cost_usd:.2f}]",
@@ -507,6 +511,11 @@ class Dispatcher:
                 except (json.JSONDecodeError, TypeError):
                     args = {}
 
+                # ── Progress callback: tool call start ──
+                if progress_callback:
+                    progress_callback(agent_def.name, round_num+1, tool_calls_made, "tool_start",
+                                      f"{name}({json.dumps(args)[:200]})")
+
                 # ── Checkpoint tool: handled locally ──
                 if name == "update_checkpoint":
                     key_info = args.get("key_info", "")
@@ -515,12 +524,23 @@ class Dispatcher:
                 else:
                     result = tool_dispatch(name, args, project_path=project_path)
 
+                # ── Progress callback: tool call result ──
+                if progress_callback:
+                    result_preview = result[:200] if result else "(empty)"
+                    progress_callback(agent_def.name, round_num+1, tool_calls_made, "tool_result",
+                                      f"{name} → {result_preview}")
+
                 messages.append({
                     "role": "tool",
                     "tool_call_id": tc["id"],
                     "name": name,
                     "content": result,
                 })
+
+            # ── Progress callback: round complete ──
+            if progress_callback:
+                progress_callback(agent_def.name, round_num+1, tool_calls_made, "round_end",
+                                  f"Round {round_num+1} complete ({len(resp.tool_calls)} tools)")
 
             # ── Auto git commit after tool round ──
             if auto_git and project_path and tool_calls_made > 0:
@@ -569,6 +589,7 @@ class Dispatcher:
         project_path: str | None = None,
         workspace_dir: str | None = None,
         max_tool_rounds: int = 50,
+        progress_callback: callable = None,
     ) -> DispatcherResult:
         """Run sub-agent in Goal Mode: self-direct until [DONE] or budget exhausted.
 
@@ -592,6 +613,7 @@ class Dispatcher:
             max_tool_rounds=max_tool_rounds,
             max_cost_usd=exe.max_cost_usd,
             auto_git=exe.auto_git_commit,
+            progress_callback=progress_callback,
         )
 
     def handle_failure(self, agent_def: AgentDefinition, goal: str,

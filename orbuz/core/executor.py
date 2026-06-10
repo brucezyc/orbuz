@@ -1008,6 +1008,7 @@ class Executor:
                         max_cost_usd=defn.execution.max_cost_usd,
                         auto_git=defn.execution.auto_git_commit,
                         max_tool_rounds=defn.execution.max_tool_rounds,
+                        progress_callback=self._make_progress_callback(run_id, stage_id, role),
                     )
                     self._cost_tracker.record_result(role, result)
                     suffix = self._fanout_suffix.get(role, 0) + 1
@@ -1015,6 +1016,7 @@ class Executor:
                     self.ws.write_output(run_id, stage_id, f"{role}_r{suffix}", result.output)
                     self.ws.write_agent_meta(run_id, stage_id, f"{role}_r{suffix}",
                                              self._agent_meta(result))
+                    yield from self._flush_progress(run_id, stage_id)
             yield {'type': 'progress', 'stage': stage_id,
                    'msg': f'  done: {sum(1 for r in all_results if r.get("exit_code",0)==0 or "path" in r)}/{len(all_results)} actions OK'}
         else:
@@ -1074,11 +1076,13 @@ class Executor:
                     max_cost_usd=defn.execution.max_cost_usd,
                     auto_git=defn.execution.auto_git_commit,
                     max_tool_rounds=defn.execution.max_tool_rounds,
+                    progress_callback=self._make_progress_callback(run_id, stage_id, role),
                 )
                 self._cost_tracker.record_result(role, result)
                 self.ws.write_output(run_id, stage_id, role, result.output)
                 self.ws.write_agent_meta(run_id, stage_id, role,
                                          self._agent_meta(result))
+                yield from self._flush_progress(run_id, stage_id)
                 prev_output = result.output
 
         yield {'type': 'progress', 'stage': stage_id, 'msg': 'codegen complete'}
@@ -1148,3 +1152,52 @@ class Executor:
                 results.append({'type': 'error', 'action': action_type, 'error': str(e)})
 
         return results
+
+    # ── Sub-agent progress callback ──
+
+    def _make_progress_callback(self, run_id: str, stage_id: str, role: str):
+        """Create a progress callback that appends events to the executor's buffer."""
+        if not hasattr(self, '_progress_buffer'):
+            self._progress_buffer: list[dict] = []
+        cb = _ProgressCallback(role, self._progress_buffer)
+        return cb
+
+    def _flush_progress(self, run_id: str, stage_id: str):
+        """Yield buffered progress events."""
+        if not hasattr(self, '_progress_buffer') or not self._progress_buffer:
+            return
+        total_tools = sum(1 for ev in self._progress_buffer if ev['event_type'] == 'tool_start')
+        yield {'type': 'progress', 'stage': stage_id,
+               'msg': f'  {self._progress_buffer[0]["role"]}: {total_tools} tool calls across {self._progress_buffer[-1]["round_num"]} rounds'}
+
+        # Log tool details to log file
+        log_lines = []
+        for ev in self._progress_buffer:
+            if ev['event_type'] == 'tool_start':
+                log_lines.append(f"  [{ev['round_num']}.{ev['tool_num']}] → {ev['msg']}")
+            elif ev['event_type'] == 'tool_result':
+                log_lines.append(f"  [{ev['round_num']}.{ev['tool_num']}] ← {ev['msg'][:150]}")
+            elif ev['event_type'] == 'budget_exhausted':
+                log_lines.append(f"  ⛔ {ev['msg']}")
+        log_path = self.ws.base / run_id / stage_id / '_tool_log.txt'
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        log_path.write_text('\n'.join(log_lines))
+        self._progress_buffer.clear()
+
+
+class _ProgressCallback:
+    """Simple callable that stores progress events in a buffer."""
+
+    def __init__(self, role: str, buffer: list[dict]):
+        self._role = role
+        self._buffer = buffer
+
+    def __call__(self, agent_name: str, round_num: int, tool_num: int,
+                 event_type: str, msg: str):
+        self._buffer.append({
+            'role': self._role,
+            'round_num': round_num,
+            'tool_num': tool_num,
+            'event_type': event_type,
+            'msg': msg,
+        })

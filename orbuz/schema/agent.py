@@ -171,6 +171,7 @@ def load_agent(name: str, agent_dir: str | Path | None = None) -> AgentDefinitio
         if builtin.exists():
             data = yaml.safe_load(builtin.read_text())
             return AgentDefinition(**data)
+        print(f"  ⚠️ Agent definition '{name}.yaml' not found — using default shell (no toolsets/skills)")
         return AgentDefinition(name=name, description=f"Agent '{name}' (definition file not found)")
     data = yaml.safe_load(path.read_text())
     return AgentDefinition(**data)

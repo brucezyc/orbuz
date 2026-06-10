@@ -15,6 +15,7 @@ import json
 import re
 from datetime import datetime, timezone
 from pathlib import Path
+from difflib import SequenceMatcher
 from orbuz.schema.plan import PlanJSON, ReconSummary
 from orbuz.schema.agent import load_index, load_agent
 from orbuz.llm.client import LLMClient
@@ -209,12 +210,82 @@ class Orchestrator:
 
             stages_count = len(plan.plan["stages"])
             print(f"  ✅ Plan generated successfully: {stages_count} stage(s)")
+
+            # ── Validate all agent roles exist in agent library ──
+            replacements = self._validate_agent_roles(plan)
+            if replacements:
+                print(f"  🔄 Agent role replacements:")
+                for orig, new in replacements:
+                    print(f"    {orig} → {new}")
+                # Update the plan stages in-place
+                for stage in plan.plan["stages"]:
+                    for agent_cfg in stage.get("agents", []):
+                        role = agent_cfg["role"]
+                        for orig, new in replacements:
+                            if role == orig:
+                                agent_cfg["role"] = new
+                                break
+
             return plan
 
         except Exception as e:
             print(f"  ⚠️ PlanJSON construction failed: {e}")
             print(f"  → Falling back to sample plan")
             return self._fallback_plan(workflow_name, topic, project_dir)
+
+    # ── Agent role validation ──
+
+    def _validate_agent_roles(self, plan: PlanJSON) -> list[tuple[str, str]]:
+        """Check all agent roles in the plan exist in agent library. Return [(old, new)] replacements."""
+        index = load_index(self.agent_dir)
+        existing = {a.name for a in index.agents}
+        replacements: list[tuple[str, str]] = []
+
+        for stage in plan.plan.get("stages", []):
+            for agent_cfg in stage.get("agents", []):
+                role = agent_cfg.get("role", "")
+                if not role or role in existing:
+                    continue
+                # Role doesn't exist — find nearest match
+                best = self._find_closest_agent(role, existing)
+                if best:
+                    print(f"  ⚠️ Agent '{role}' not found → using nearest match '{best}'")
+                else:
+                    print(f"  ⚠️ Agent '{role}' not found and no close match — using 'debugger' as fallback")
+                    best = "debugger"
+                replacements.append((role, best))
+        return replacements
+
+    @staticmethod
+    def _find_closest_agent(name: str, existing: set[str]) -> str | None:
+        """Find the closest matching agent name by token similarity."""
+        if not existing:
+            return None
+        name_lower = name.lower()
+        # Exact substring match first
+        for e in existing:
+            if name_lower in e.lower() or e.lower() in name_lower:
+                return e
+        # Token overlap: check for shared meaningful tokens (split on - and _)
+        name_tokens = set(name_lower.replace("-", "_").split("_"))
+        best_score = 0
+        best_match = None
+        for e in existing:
+            e_tokens = set(e.lower().replace("-", "_").split("_"))
+            overlap = len(name_tokens & e_tokens)
+            if overlap > best_score:
+                best_score = overlap
+                best_match = e
+        if best_score > 0:
+            return best_match
+        # Fallback: SequenceMatcher
+        best_score = 0
+        for e in existing:
+            score = SequenceMatcher(None, name_lower, e.lower()).ratio()
+            if score > best_score:
+                best_score = score
+                best_match = e
+        return best_match if best_score > 0.3 else None
 
     # ── JSON parsing helpers ──
 
