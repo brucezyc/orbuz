@@ -247,12 +247,20 @@ def _cmd_run(args):
         # 1. Orchestrator does Recon -> plan.json
         topic = args.goal or args.topic
         project_dir = args.project_dir or os.getcwd()
+
+        # Load previous orbuz run context for this project
+        from orbuz.core.executor import _load_previous_context_fast
+        previous_context = _load_previous_context_fast(project_dir)
+        if previous_context:
+            print(f"  📜 Found previous orbuz run context ({len(previous_context)} chars)")
+
         orch = Orchestrator(
             llm_client=llm,
             agent_dir=args.agent_dir,
         )
         plan = orch.recon(topic=topic, workflow_name=args.workflow_name,
-                          project_dir=project_dir)
+                          project_dir=project_dir,
+                          previous_context=previous_context)
 
         # Inject project_dir into all stages (unified: no codegen/workflow distinction)
         stages = plan.get('plan', {}).get('stages', [])

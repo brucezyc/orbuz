@@ -35,7 +35,8 @@ class Orchestrator:
         self.agent_dir = Path(agent_dir) if agent_dir else Path.cwd() / "agents"
 
     def recon(self, topic: str, workflow_name: str | None = None,
-              project_dir: str | None = None) -> dict:
+              project_dir: str | None = None,
+              previous_context: str | None = None) -> dict:
         """Execute Recon → return plan.json (dict)"""
         name = workflow_name or topic.replace(" ", "-")[:40].lower()
 
@@ -50,11 +51,13 @@ class Orchestrator:
             return plan.model_dump()
 
         # Real mode: use LLM for recon → output plan (TODO)
-        plan = self._real_recon(topic, name, index, project_dir=project_dir)
+        plan = self._real_recon(topic, name, index, project_dir=project_dir,
+                                previous_context=previous_context)
         return plan.model_dump()
 
     def _real_recon(self, topic: str, workflow_name: str,
-                    index, project_dir: str | None = None) -> PlanJSON:
+                    index, project_dir: str | None = None,
+                    previous_context: str | None = None) -> PlanJSON:
         """Real mode: LLM analyzes the topic → designs a plan → parses JSON output"""
 
         # ── Build prompt ──
@@ -87,6 +90,7 @@ class Orchestrator:
             f"## Topic\n{topic}\n\n"
             f"## Project Directory\n{project_dir or '(not specified)'}\n\n"
             "Use this path for any 'cd' commands in codegen run actions.\n"
+            f"\n## Previous Work Context\n{previous_context or '(none)'}\n\n"
             f"## Available Agent Library\n{chr(10).join(agent_list_lines)}\n\n"
             "## Agent Selection Rules\n"
             "Use agent names EXACTLY as they appear in the library. Do NOT invent new role names.\n"

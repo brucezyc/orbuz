@@ -110,7 +110,7 @@ class Executor:
     MAX_ROUNDS = 3  # Multi-round fanout limit
 
     def __init__(self, plan: dict, llm_client: LLMClient, run_id: str | None = None,
-                 webhook_url: str | None = None):
+                 webhook_url: str | None = None, project_dir: str | None = None):
         self.plan = plan
         self.dispatcher = Dispatcher(llm_client)
         self.ws = WorkspaceManager()
@@ -119,6 +119,7 @@ class Executor:
         self._cost_tracker = CostTracker()
         self.run_id = run_id
         self.webhook_url = webhook_url
+        self.project_dir = project_dir
         self._fanout_suffix = {}
         # Heartbeat tracking
         self._last_webhook_ts = 0.0
@@ -148,47 +149,86 @@ class Executor:
         }
 
     def _generate_summary(self) -> str:
-        """Generate a task summary markdown from plan and cost tracker."""
+        """Generate a detailed task summary with status, costs, and project context."""
+
+        def _stage_status(run_id, stage_id) -> str:
+            try:
+                return self.ws.get_stage_status(run_id, stage_id) or "unknown"
+            except Exception:
+                return "unknown"
+
         s = self._cost_tracker.summary()
         plan = self.plan
         stages = plan.get("plan", plan).get("stages", plan.get("stages", []))
         task_name = plan.get("workflow", {}).get("name", plan.get("name", "unnamed"))
         task_desc = plan.get("workflow", {}).get("description", "")
+        run_id = self.run_id or ""
+
+        # Determine overall status
+        all_completed = all(
+            _stage_status(run_id, st.get("id", "")) == "completed" for st in stages
+        ) if run_id and stages else False
+        any_failed = any(
+            _stage_status(run_id, st.get("id", "")) in ("failed", "error") for st in stages
+        ) if run_id and stages else False
+        if all_completed:
+            overall = "COMPLETED"
+        elif any_failed:
+            overall = "PARTIAL"
+        else:
+            overall = "COMPLETED"  # no explicit failure tracking = assume done
 
         lines = []
         lines.append(f"# Task Summary: {task_name}")
+        lines.append(f"**Status:** `{overall}`")
         if task_desc:
-            lines.append(f"\n> {task_desc}")
+            lines.append(f"> {task_desc}")
+        lines.append(f"**Run ID:** `{run_id}`")
+        lines.append(f"**Model:** {s.get('per_agent', {}).get(list(s.get('per_agent', {}).keys())[0] if s.get('per_agent', {}) else '', {}).get('models', ['?'])[0]}")
         lines.append("")
 
-        # Task decomposition
-        lines.append("## Task Decomposition")
+        # ── Stage results ──
+        lines.append("## Stages")
         for stage in stages:
             sid = stage.get("id", "?")
+            sname = stage.get("name", "")
             pattern = stage.get("pattern", "?")
+            status = _stage_status(run_id, sid) if run_id else "unknown"
             agents = stage.get("agents", stage.get("tasks", []))
             if not agents:
                 agents = stage.get("review_agents", [])
-                if agents:
-                    lines.append(f"\n- **Stage `{sid}`** ({pattern}): {len(agents)} reviewers")
-                    for a in agents:
-                        if isinstance(a, str):
-                            lines.append(f"  - `{a}`")
-                        else:
-                            lines.append(f"  - `{a.get('role','?')}` — {a.get('goal','')[:100]}")
-                else:
-                    lines.append(f"\n- **Stage `{sid}`** ({pattern})")
-                continue
-            lines.append(f"\n- **Stage `{sid}`** ({pattern}): {len(agents)} agents")
+            agent_list = []
             for a in agents:
-                role = a.get("role", "?")
-                goal = a.get("goal", "")
-                if goal:
-                    lines.append(f"  - `{role}` — {goal[:150]}")
+                if isinstance(a, str):
+                    agent_list.append(f"`{a}`")
                 else:
-                    lines.append(f"  - `{role}`")
+                    agent_list.append(f"`{a.get('role','?')}`")
+            lines.append(f"\n### {sid} — {sname} `[{status}]`")
+            lines.append(f"- **Pattern:** {pattern}")
+            lines.append(f"- **Agents:** {', '.join(agent_list) if agent_list else '(none)'}")
+            # Read agent outputs for this stage
+            if run_id:
+                for a in agents:
+                    role = a if isinstance(a, str) else a.get("role", "")
+                    if not role:
+                        continue
+                    out_path = self.ws.base / run_id / sid / f"{role}.md"
+                    if out_path.exists():
+                        content = out_path.read_text().strip()
+                        preview = content[:200] + ("..." if len(content) > 200 else "")
+                        if preview:
+                            lines.append(f"  - **{role} output:** {preview.replace(chr(10), ' ')}")
+                    meta_path = self.ws.base / run_id / sid / f"{role}.meta.json"
+                    if meta_path.exists():
+                        try:
+                            meta = json.loads(meta_path.read_text())
+                            if isinstance(meta, list) and meta:
+                                m = meta[-1]  # last attempt
+                                lines.append(f"    cost=${m.get('cost_usd',0):.4f} tokens={m.get('input_tokens',0)+m.get('output_tokens',0)} success={m.get('success',False)}")
+                        except Exception:
+                            pass
 
-        # Cost summary
+        # ── Cost summary ──
         lines.append("\n## Cost & Token Usage")
         lines.append(f"\n**Total:** ${s['total_cost_usd']:.4f} | "
                      f"Tokens: {s['total_tokens']:,} "
@@ -197,21 +237,116 @@ class Executor:
         lines.append("")
         per_agent = s.get("per_agent", {})
         if per_agent:
-            lines.append("| Agent | Calls | Input | Output | Cost | Duration |")
-            lines.append("|---|---|---|---|---|---|")
+            lines.append("| Agent | Calls | Input | Output | Cost |")
+            lines.append("|---|---|---|---|---|")
             for name, stats in sorted(per_agent.items(),
                                       key=lambda x: -x[1].get("cost_usd", 0)):
                 inp = stats.get("input_tokens", 0)
                 out = stats.get("output_tokens", 0)
                 cost = stats.get("cost_usd", 0)
-                dur = stats.get("duration_s", stats.get("duration", 0))
                 lines.append(f"| `{name}` | {stats.get('calls',0)} | {inp:,} | {out:,} | "
-                             f"${cost:.4f} | {dur:.1f}s |")
-        else:
-            # Fallback: read from per-agent meta files
-            pass
+                             f"${cost:.4f} |")
 
-        return "\n".join(lines) + "\n"
+        # ── Git changes (if project dir under git) ──
+        if self.project_dir:
+            import subprocess as _sp
+            try:
+                git_dir = Path(self.project_dir)
+                r = _sp.run(["git", "-C", str(git_dir), "diff", "--stat"],
+                           capture_output=True, text=True, timeout=10)
+                if r.stdout.strip():
+                    lines.append("\n## Git Changes (uncommitted)")
+                    lines.append(f"```\n{r.stdout.strip()}\n```")
+                r2 = _sp.run(["git", "-C", str(git_dir), "log", "--oneline", "-5"],
+                            capture_output=True, text=True, timeout=10)
+                if r2.stdout.strip():
+                    lines.append("\n## Recent Commits")
+                    lines.append(f"```\n{r2.stdout.strip()}\n```")
+            except Exception:
+                pass
+
+        # ── Next steps (from plan) ──
+        if stages:
+            next_stages = [s for s in stages if _stage_status(run_id, s.get("id", "")) != "completed"] if run_id else stages
+            if next_stages:
+                lines.append("\n## Remaining")
+                for s in next_stages:
+                    agents = [a.get("role", "?") if isinstance(a, dict) else str(a) for a in s.get("agents", s.get("tasks", s.get("review_agents", [])))]
+                    lines.append(f"- **{s.get('id','?')}:** {', '.join(agents) if agents else '(no agents)'}")
+                lines.append("")
+
+        result = "\n".join(lines) + "\n"
+        return result
+
+    # ── Project context discovery ──
+
+    def _load_previous_context(self) -> str:
+        """Scan project directory for previous orbuz run summaries.
+
+        Returns a markdown string describing prior work for injection
+        into the orchestrator prompt or run context.
+        """
+        if not self.project_dir:
+            return ""
+        workspace = Path(self.project_dir) / "_workspace"
+        if not workspace.exists():
+            return ""
+
+        summaries = sorted(
+            workspace.glob("*/summary.md"),
+            key=lambda p: p.stat().st_mtime,
+            reverse=True,
+        )
+        if not summaries:
+            # No summary files — check for any run directories with output
+            run_dirs = sorted(
+                [d for d in workspace.iterdir() if d.is_dir() and d.name != "current"],
+                key=lambda d: d.stat().st_mtime,
+                reverse=True,
+            )
+            if not run_dirs:
+                return ""
+            # Read status from recent runs
+            lines = ["## Previous Orbuz Runs (no summary found)"]
+            for d in run_dirs[:3]:
+                status_file = d / "status.json"
+                if status_file.exists():
+                    try:
+                        st = json.loads(status_file.read_text())
+                        state = st.get("state", "unknown")
+                        stages = st.get("stages", [])
+                        stage_statuses = ", ".join(f"{s['id']}: {s['status']}" for s in stages[:5])
+                        lines.append(f"- `{d.name}` — state={state} | {stage_statuses}")
+                    except Exception:
+                        lines.append(f"- `{d.name}` — (unreadable)")
+                else:
+                    lines.append(f"- `{d.name}` — (no status)")
+            return "\n".join(lines)
+
+        # Read the most recent summary
+        latest = summaries[0]
+        run_id = latest.parent.name
+        content = latest.read_text().strip()
+        # Truncate to keep context manageable
+        if len(content) > 3000:
+            content = content[:3000] + "\n...(truncated)"
+
+        lines = [
+            "## Previous Orbuz Run",
+            f"**Run:** `{run_id}`",
+            f"**Summary:**",
+            content,
+        ]
+
+        # Check for more recent runs (up to 3 total)
+        if len(summaries) > 1:
+            lines.append("\n### Older Runs")
+            for s in summaries[1:4]:
+                rid = s.parent.name
+                preview = s.read_text().strip()[:200].replace("\n", " ")
+                lines.append(f"- `{rid}` — {preview}...")
+
+        return "\n".join(lines)
 
     def run(self):
         """Generator: yields events."""
@@ -1183,6 +1318,48 @@ class Executor:
         log_path.parent.mkdir(parents=True, exist_ok=True)
         log_path.write_text('\n'.join(log_lines))
         self._progress_buffer.clear()
+
+
+def _load_previous_context_fast(project_dir: str | None) -> str:
+    """Standalone function to quickly load previous orbuz run context from a project.
+
+    Used by the CLI to inject prior work context into the orchestrator prompt.
+    """
+    if not project_dir:
+        return ""
+    workspace = Path(project_dir) / "_workspace"
+    if not workspace.exists():
+        return ""
+
+    summaries = sorted(
+        workspace.glob("*/summary.md"),
+        key=lambda p: p.stat().st_mtime,
+        reverse=True,
+    )
+    if not summaries:
+        return ""
+
+    latest = summaries[0]
+    run_id = latest.parent.name
+    content = latest.read_text().strip()
+    if len(content) > 3000:
+        content = content[:3000] + "\n...(truncated)"
+
+    lines = [
+        "## Previous Work Summary (auto-detected)",
+        f"**Previous Run:** `{run_id}`",
+        "",
+        content,
+    ]
+
+    if len(summaries) > 1:
+        lines.append("\n### Older Runs")
+        for s in summaries[1:4]:
+            rid = s.parent.name
+            preview = s.read_text().strip()[:150].replace("\n", " ")
+            lines.append(f"- `{rid}` — {preview}...")
+
+    return "\n".join(lines)
 
 
 class _ProgressCallback:
