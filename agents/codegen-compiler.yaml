@@ -36,5 +36,5 @@ model_hint:
 execution:
   max_tool_rounds: 30
   max_cost_usd: 0.3
-  auto_git_commit: false
+  auto_git_commit: true
   retry_on_failure: compile
