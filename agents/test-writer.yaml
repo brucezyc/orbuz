@@ -45,5 +45,5 @@ permissions:
 execution:
   max_tool_rounds: 30
   max_cost_usd: 0.3
-  auto_git_commit: true
+  auto_git_commit: false
   retry_on_failure: always
