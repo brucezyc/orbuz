@@ -354,6 +354,45 @@ class Dispatcher:
         }
         return [summary_msg] + keep
 
+    def _fingerprint_tool_calls(self, tool_calls: list) -> set:
+        """Compute a set of (tool_name, args_keys) fingerprints for stall detection."""
+        fps = set()
+        for tc in tool_calls:
+            fn = tc.get("function", {})
+            name = fn.get("name", "?")
+            try:
+                args = json.loads(fn.get("arguments", "{}"))
+            except (json.JSONDecodeError, TypeError):
+                args = {}
+            # Key args only (skip large string values, use keys + type hint)
+            key_args = tuple(sorted(
+                f"{k}:{type(v).__name__}" for k, v in args.items()
+            ))
+            fps.add((name, key_args))
+        return fps
+
+    @staticmethod
+    def _extract_error_signal(result: str, tool_name: str) -> str:
+        """Preprocess tool output: extract structured errors from terminal output.
+
+        Uses feedback_loop parsers to strip noise and present errors concisely.
+        """
+        if tool_name != "terminal":
+            return result
+        try:
+            from orbuz.codegen.feedback_loop import parse_errors_generic, format_errors_for_llm
+            errors = parse_errors_generic(result)
+            if errors:
+                return format_errors_for_llm(errors, result)
+            # Fallback: try Python error parser
+            from orbuz.codegen.feedback_loop import parse_errors_python
+            py_errors = parse_errors_python(result)
+            if py_errors:
+                return format_errors_for_llm(py_errors, result)
+        except ImportError:
+            pass
+        return result
+
     def run_agent_with_tools(
         self, agent_def: AgentDefinition, goal: str,
         context: str = "", tier: str = "balanced",
@@ -413,10 +452,20 @@ class Dispatcher:
         tool_calls_made = 0
         _compress_trigger = 15  # compress after 15 rounds
 
+        # ── No-Progress Detection: track consecutive identical tool call patterns ──
+        prev_fingerprints: set | None = None
+        stall_count = 0
+        stall_threshold = agent_def.execution.stall_threshold
+        per_round_ratio = agent_def.execution.per_round_budget_ratio
+        use_error_parsing = agent_def.execution.structured_error_parsing
+
         for round_num in range(max_tool_rounds):
             # ── Conversation compression: after 15+ rounds, summarize old history ──
             if round_num >= _compress_trigger and round_num % 5 == 0:
                 messages = self._compress_messages(messages, system, tier)
+
+            # ── Per-round cost tracking ──
+            round_start_cost = total_cost
 
             resp = self.llm.chat(
                 model_tier=tier,
@@ -524,6 +573,11 @@ class Dispatcher:
                 else:
                     result = tool_dispatch(name, args, project_path=project_path)
 
+                # ── Structured Error Preprocessing ──
+                # Preprocess terminal error output before feeding back to the agent
+                if use_error_parsing:
+                    result = self._extract_error_signal(result, name)
+
                 # ── Progress callback: tool call result ──
                 if progress_callback:
                     result_preview = result[:200] if result else "(empty)"
@@ -536,6 +590,39 @@ class Dispatcher:
                     "name": name,
                     "content": result,
                 })
+
+            # ── No-Progress Detection ──
+            # Compare this round's tool call fingerprint with previous round
+            current_fingerprints = self._fingerprint_tool_calls(resp.tool_calls)
+            if prev_fingerprints is not None and current_fingerprints == prev_fingerprints:
+                stall_count += 1
+                if stall_threshold > 0 and stall_count >= stall_threshold:
+                    # Inject stall warning into messages
+                    stall_warning = (
+                        f"[SYSTEM: No progress detected — you have called the same tools with "
+                        f"the same arguments for {stall_count} consecutive rounds. "
+                        f"Your current approach is not working. Try a fundamentally different "
+                        f"strategy: different command, different tool, or a different file.]"
+                    )
+                    messages.append({"role": "user", "content": stall_warning})
+                    stall_count = 0  # reset after warning
+            else:
+                stall_count = 0
+            prev_fingerprints = current_fingerprints
+
+            # ── Per-Round Budget Overshoot Detection ──
+            round_cost = total_cost - round_start_cost
+            if (per_round_ratio > 0 and max_cost_usd > 0 and round_num > 0
+                    and round_cost > max_cost_usd * per_round_ratio
+                    and round_cost > 0.01):  # ignore noise
+                budget_warning = (
+                    f"[SYSTEM: This round cost ${round_cost:.4f}, which is "
+                    f"{round_cost/max_cost_usd*100:.0f}% of your total budget (${max_cost_usd:.2f}). "
+                    f"Your current approach is too expensive. Switch to cheaper tools "
+                    f"(e.g. smaller commands, read_file instead of terminal, targeted patches) "
+                    f"or narrow your scope.]"
+                )
+                messages.append({"role": "user", "content": budget_warning})
 
             # ── Progress callback: round complete ──
             if progress_callback:

@@ -110,6 +110,14 @@ class ExecutionConfig(BaseModel):
     retry_on_failure: str = "always"
     """How to handle LLM/tool failures: 'never' (skip), 'compile' (retry only compile errors), 'always'."""
 
+    # ── Loop Engineering: No-Progress Detection ──
+    stall_threshold: int = 3
+    """Consecutive identical tool-call rounds before escalation (0 = disabled)."""
+    per_round_budget_ratio: float = 0.3
+    """Max fraction of total budget a single round can use before warning (0 = disabled)."""
+    structured_error_parsing: bool = True
+    """If True, preprocess terminal error output before feeding back to agent."""
+
 
 class AgentDefinition(BaseModel):
     name: str
