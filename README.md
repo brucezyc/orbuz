@@ -75,6 +75,37 @@ orbuz run "..." --resume
 ```
 Skips completed stages and continues from the last checkpoint.
 
+## Loop Engineering
+
+The agent tool loop (`run_agent_with_tools`) includes three safeguards against common failure modes:
+
+### No-Progress Detection
+
+After each tool-calling round, the system computes a **fingerprint** of the agent's tool calls (tool name + argument structure). If 3+ consecutive rounds produce identical fingerprints, a stall warning is injected:
+
+> `[SYSTEM: No progress detected — you have called the same tools with the same arguments for 3 consecutive rounds.]`
+
+Configurable via `ExecutionConfig.stall_threshold` (default: 3, 0 = disabled).
+
+### Per-Round Budget Overshoot
+
+Tracks cost per individual round. If a single round exceeds 30% of the total `max_cost_usd` budget, the agent is warned to switch to a cheaper strategy:
+
+> `[SYSTEM: This round cost $0.12, which is 60% of your total budget ($0.20). Switch to cheaper tools.]`
+
+Configurable via `ExecutionConfig.per_round_budget_ratio` (default: 0.3, 0 = disabled).
+
+### Structured Error Preprocessing
+
+When a `terminal` tool call returns a non-zero exit code, the raw output is preprocessed through `feedback_loop.py` parsers (Rust, Python, generic `file:line:col`). Structured errors are extracted and presented concisely to the agent — reducing token waste and improving fix iteration quality:
+
+```
+Before (500 raw lines):  ... cargo check output ...
+After: "共 3 个编译错误:\n1. [ERROR] src/main.rs:42:18\n    mismatched types"
+```
+
+Configurable via `ExecutionConfig.structured_error_parsing` (default: true).
+
 ## Cost Tracking
 
 Every run shows per-agent token usage and estimated cost:
