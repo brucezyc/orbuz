@@ -177,6 +177,14 @@ def main():
         parser.print_help()
 
 
+def _load_previous_context_fast(project_dir):
+    """Read the most recent saved summary, if this project has one."""
+    from pathlib import Path
+    summaries = sorted((Path(project_dir) / "_workspace").glob("*/summary.md"),
+                       key=lambda path: path.stat().st_mtime, reverse=True)
+    return summaries[0].read_text(encoding="utf-8")[:12000] if summaries else ""
+
+
 def _cmd_run(args):
     import json
     from pathlib import Path
@@ -256,7 +264,6 @@ def _cmd_run(args):
         project_dir = args.project_dir or os.getcwd()
 
         # Load previous orbuz run context for this project
-        from orbuz.core.executor import _load_previous_context_fast
         previous_context = _load_previous_context_fast(project_dir)
         if previous_context:
             print(f"  📜 Found previous orbuz run context ({len(previous_context)} chars)")

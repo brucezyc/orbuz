@@ -49,3 +49,26 @@ def test_architect_config_preserves_cli_override():
     assert args.architect_model == "cli/model"
     assert args.architect_api_key == "test-key"
     assert args.architect_api_base == "https://example.invalid"
+
+
+def test_cli_run_reaches_executor(tmp_path, monkeypatch):
+    from orbuz.cli.main import main
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("sys.argv", ["orbuz", "run", "test", "--auto",
+                                    "--project-dir", str(tmp_path)])
+    monkeypatch.setattr(Orchestrator, "recon", lambda self, **kwargs: {
+        "workflow": {"name": "cli-regression"}, "recon_summary": {},
+        "plan": {"stages": []},
+    })
+    main()
+    status = json.loads((tmp_path / "_workspace/current/status.json").read_text())
+    assert status["state"] == "completed"
+
+
+def test_previous_context_reads_saved_summary(tmp_path):
+    from orbuz.cli.main import _load_previous_context_fast
+    assert _load_previous_context_fast(tmp_path) == ""
+    summary = tmp_path / "_workspace/run/summary.md"
+    summary.parent.mkdir(parents=True)
+    summary.write_text("Previous summary")
+    assert _load_previous_context_fast(tmp_path) == "Previous summary"
