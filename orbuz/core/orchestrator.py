@@ -34,7 +34,8 @@ class Orchestrator:
         self.llm = llm_client
         self.agent_dir = Path(agent_dir) if agent_dir else Path.cwd() / "agents"
 
-    def recon(self, topic: str, workflow_name: str | None = None) -> dict:
+    def recon(self, topic: str, workflow_name: str | None = None,
+              project_dir: str | None = None, previous_context: str = "") -> dict:
         """Execute Recon → return plan.json (dict)"""
         name = workflow_name or topic.replace(" ", "-")[:40].lower()
 
@@ -49,11 +50,12 @@ class Orchestrator:
             return plan.model_dump()
 
         # Real mode: use LLM for recon → output plan (TODO)
-        plan = self._real_recon(topic, name, index)
+        plan = self._real_recon(topic, name, index, project_dir, previous_context)
         return plan.model_dump()
 
     def _real_recon(self, topic: str, workflow_name: str,
-                    index) -> PlanJSON:
+                    index, project_dir: str | None = None,
+                    previous_context: str = "") -> PlanJSON:
         """Real mode: LLM analyzes the topic → designs a plan → parses JSON output"""
 
         # ── Build prompt ──
@@ -77,7 +79,9 @@ class Orchestrator:
 
         prompt = (
             f"## Topic\n{topic}\n\n"
-            f"## Available Agent Library\n{''.join(agent_list_lines)}\n\n"
+            f"## Project Directory\n{project_dir or Path.cwd()}\n\n"
+            f"## Previous Work Context\n{previous_context}\n\n"
+            f"## Available Agent Library\n{chr(10).join(agent_list_lines)}\n\n"
             "## Output Requirements\n"
             "Output a JSON strictly following this structure (no extra text, no markdown wrapping):\n\n"
             "```json\n"
@@ -199,7 +203,7 @@ class Orchestrator:
                 plan=plan_data.get("plan", {"stages": []}),
                 alternatives_considered=plan_data.get("alternatives_considered", []),
                 generated_at=datetime.now(timezone.utc).isoformat(),
-                model_used=self.llm.get_model_name("quality"),
+                model_used=self.llm.get_model_name("architect"),
             )
 
             # Validate stages are not empty

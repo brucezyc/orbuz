@@ -141,8 +141,9 @@ class LLMClient:
         self.tier_config = tier_config
         for tier in self.TIERS:
             tc = tier_config.get(tier, {})
-            if tc.get("api_key") and tc.get("model_id"):
-                pid = Catalog.parse_model_id(tc["model_id"])[0]
+            model_id = tc.get("model_id") or (models or {}).get(tier) or DEFAULT_MODELS.get(tier)
+            if model_id and (tc.get("api_key") or tc.get("api_base")):
+                pid = Catalog.parse_model_id(model_id)[0]
                 prov = self.catalog.get_provider(pid)
                 if prov:
                     if tc.get("api_key"):
