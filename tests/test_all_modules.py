@@ -71,7 +71,7 @@ print(f"8. Findings eval: OK")
 reg = get_registry()
 captured = []
 @hook("after_agent_run")
-def test_hook(agent_def, result):
+def capture_agent_run(agent_def, result):
     captured.append(agent_def.name)
 reg.run("after_agent_run", AgentDefinition(name="test-agent", description="Test"), DispatcherResult(success=True))
 assert len(captured) == 1

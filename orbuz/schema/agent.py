@@ -62,8 +62,8 @@ class ModelHint(BaseModel):
     @field_validator("tier", "fallback")
     @classmethod
     def check_tier(cls, v):
-        if v not in {"cheap", "balanced", "quality"}:
-            raise ValueError(f"tier must be cheap/balanced/quality, got '{v}'")
+        if v not in {"cheap", "balanced", "quality", "architect"}:
+            raise ValueError(f"tier must be cheap/balanced/quality/architect, got '{v}'")
         return v
 
 

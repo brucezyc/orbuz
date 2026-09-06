@@ -108,7 +108,7 @@ class LLMClient:
     config, then the client calls the appropriate API format.
     """
 
-    TIERS = ("quality", "balanced", "cheap")
+    TIERS = ("architect", "quality", "balanced", "cheap")
 
     def __init__(self, models: dict[str, str] | None = None,
                  api_key: str | None = None,

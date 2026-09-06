@@ -76,7 +76,7 @@ def _apply_config(args, cfg: dict):
             setattr(args, cli_attr, cfg[cfg_key])
 
     # Per-tier keys
-    for tier in ("quality", "balanced", "cheap"):
+    for tier in ("architect", "quality", "balanced", "cheap"):
         tier_cfg = cfg.get(tier, {})
         for suffix in ("model", "api_key", "api_base"):
             cli_attr = f"{tier}_{suffix}"
@@ -96,6 +96,8 @@ def main():
                      help="Auto-approve plan and checkpoints (no interactive prompts)")
     run.add_argument("--config", default=None,
                      help="YAML config file with API keys/base URLs")
+    run.add_argument("--architect-model", default=None,
+                     help="Architect model ID (default: from DEFAULT_MODELS)")
     run.add_argument("--quality-model", default=None,
                      help="Quality model ID (default: from DEFAULT_MODELS)")
     run.add_argument("--balanced-model", default=None,
@@ -123,6 +125,10 @@ def main():
                      help="Per-tier API key for cheap model provider")
     run.add_argument("--cheap-api-base", default=None,
                      help="Per-tier API base for cheap model provider")
+    run.add_argument("--architect-api-key", default=None,
+                     help="Per-tier API key for architect model provider")
+    run.add_argument("--architect-api-base", default=None,
+                     help="Per-tier API base for architect model provider")
     run.add_argument("--guardrails", default=None, choices=["on", "off"],
                      help="Enable/disable LLM response guardrails (default: off)")
     run.add_argument("--guardrails-tools", default=None,
@@ -181,13 +187,14 @@ def _cmd_run(args):
 
     # Create LLM client (auto-mocks when no key provided)
     models = {
+        "architect": args.architect_model,
         "quality": args.quality_model,
         "balanced": args.balanced_model,
         "cheap": args.cheap_model,
     }
     # Build per-tier config
     tier_config = {}
-    for tier in ("quality", "balanced", "cheap"):
+    for tier in ("architect", "quality", "balanced", "cheap"):
         cfg = {}
         k = getattr(args, f"{tier}_api_key", None)
         b = getattr(args, f"{tier}_api_base", None)

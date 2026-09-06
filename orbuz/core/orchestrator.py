@@ -150,8 +150,8 @@ class Orchestrator:
             '  ]\n'
             '}\n'
             '```\n\n'
-            "Available patterns: fanout (parallel), pipeline (sequential), producer_reviewer (produce→review cycle)\\n"
-            "Available model tiers: cheap (information gathering), balanced (default), quality (analysis/synthesis)\\n"
+            "Available patterns: fanout (parallel), pipeline (sequential), producer_reviewer (produce→review cycle)\n"
+            "Available model tiers: cheap (information gathering), balanced (default), quality (analysis/synthesis), architect (planning/decomposition)\n"
             "New: Each agent can have an error_handler field for self-healing:\\n"
             "  - run_command: shell command to validate output (e.g. 'cargo check 2>&1')\\n"
             "  - pass_condition: 'exit_code == 0' | 'contains:SUCCESS' | '' (no check)\\n"
@@ -165,7 +165,7 @@ class Orchestrator:
         )
 
         resp = self.llm.chat(
-            model_tier="quality",
+            model_tier="architect",
             system=system,
             messages=[{"role": "user", "content": prompt}],
         )

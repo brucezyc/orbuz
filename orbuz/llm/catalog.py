@@ -14,6 +14,7 @@ from orbuz.llm.provider import ProviderConfig, ModelInfo, EndpointType, KNOWN_PR
 # ── Default model presets ──
 
 DEFAULT_MODELS: dict[str, str] = {
+    "architect": "deepseek/deepseek-v4-pro",   # ← 预留，用户自行替换为 K3 的 model ID
     "quality": "deepseek/deepseek-v4-pro",
     "balanced": "deepseek/deepseek-v4-flash",
     "cheap": "deepseek/deepseek-v4-flash",
