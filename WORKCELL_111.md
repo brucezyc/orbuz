@@ -10,7 +10,7 @@ Provisioned 2026-09-07. No real model task has been started.
 - Python environment: `/root/venv`; Rust minimal stable toolchain installed.
 - Empty task area: `/root/projects`; evidence state: `/root/orbuz-state`.
 - Model configuration: `/root/.orbuz/forge.yaml`, mode 0600, model/key/api_base fields copied from 109. Webhooks and unrelated settings omitted. Existing containers were not modified.
-- Observed legacy configuration: quality/balanced/cheap specify `deepseek/deepseek-v4-flash`; architect has no explicit model. All tiers can obtain a key via tier/global fields. Credential presence is not API authentication evidence.
+- Current `forge.yaml` (user-edited on 111): quality=`gpt-6-astra`, balanced=`gpt-5.6-sol`, cheap=`Qwen/Qwen3.8-27B`, all with `api_base` on shu26.cfd. Architect is still absent. Credential presence is not API authentication evidence.
 
 ## Verified (offline only)
 
@@ -27,4 +27,6 @@ The first installation attempt ran before DHCP DNS was ready and failed. Origina
 
 The new `python -m orbuz.runtime` entry implements one bounded task with native tools and fixed independent acceptance. It does NOT read four-tier `forge.yaml`: pass explicit model/base-url and key environment per RUNTIME.md. `orbuz run --config /root/.orbuz/forge.yaml` is the separate preserved legacy multi-agent entry. Do not imply that tests of the new core certify the legacy orchestration chain or autonomous large-project delivery.
 
-Before a live run: choose the real deliverable, acceptance, model endpoint and request/token/time limits. Resolve architect configuration if using the legacy workflow. Prepare task requirements, not the implementation. Hermes may independently test artifacts but must disclose any rescue edits. No automatic retry service, cron or paid completion was enabled during setup.
+Missing or failed tiers now walk architect → quality → balanced → cheap. A 2026-09-07 bounded probe on 111 at `08d3f3a` showed: architect/quality both land on `gpt-5.6-sol` after quality 503; cheap keeps the full `Qwen/Qwen3.8-27B` API id. That is connectivity plus fallback, not a complete `orbuz run`.
+
+Before a live run: choose the real deliverable, acceptance, model endpoint and request/token/time limits. Prepare task requirements, not the implementation. Hermes may independently test artifacts but must disclose any rescue edits.
