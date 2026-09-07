@@ -19,20 +19,32 @@ def remote(args, text=None, capture=False):
 
 if __name__ == '__main__':
     revision = subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip()
-    remote(['pvesh', 'get', '/cluster/nextid', '--vmid', VMID])
-    key = Path('/root/.ssh/id_ed25519.pub').read_text()
-    remote(['tee', '/tmp/orbuz-test-111.pub'], key, capture=True)
-    remote(['pct', 'create', VMID,
+    resume = sys.argv[1:] == ['--resume-install']
+    if sys.argv[1:] and not resume:
+        raise SystemExit('Only --resume-install is supported')
+    if resume:
+        name = remote(['pct', 'exec', VMID, '--', 'hostname'], capture=True).stdout.strip()
+        assert name == 'orbuz-test', 'Refuse installation in an unrelated container'
+    else:
+        remote(['pvesh', 'get', '/cluster/nextid', '--vmid', VMID])
+        key = Path('/root/.ssh/id_ed25519.pub').read_text()
+        remote(['tee', '/tmp/orbuz-test-111.pub'], key, capture=True)
+        remote(['pct', 'create', VMID,
             'local:vztmpl/debian-12-standard_12.12-1_amd64.tar.zst',
             '--hostname', 'orbuz-test', '--cores', '2', '--memory', '4096',
             '--swap', '512', '--rootfs', 'local-lvm:30',
             '--net0', 'name=eth0,bridge=vmbr0,ip=dhcp',
             '--unprivileged', '1', '--features', 'nesting=1,keyctl=1',
             '--ssh-public-keys', '/tmp/orbuz-test-111.pub', '--onboot', '0'])
-    remote(['pct', 'start', VMID])
+        remote(['pct', 'start', VMID])
     setup = f'''set -euo pipefail
 export DEBIAN_FRONTEND=noninteractive
-apt-get -o Acquire::Retries=3 update
+for attempt in $(seq 1 30); do
+    if getent ahostsv4 deb.debian.org >/dev/null; then break; fi
+    sleep 2
+done
+getent ahostsv4 deb.debian.org >/dev/null
+apt-get -o APT::Update::Error-Mode=any -o Acquire::Retries=3 update
 apt-get install -y git curl ca-certificates build-essential pkg-config libssl-dev python3 python3-venv python3-dev bubblewrap openssh-server tmux
 systemctl enable --now ssh
 python3 -m venv /root/venv
