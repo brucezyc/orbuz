@@ -58,6 +58,8 @@ def validate(spec):
         values = spec.get(key, [])
         if not isinstance(values, list):
             raise ValueError(key + ' must be a list')
+        if len(values) > 128:
+            raise ValueError('Too many scope/context files')
         spec[key] = list(dict.fromkeys(relative(x) for x in values))
         for name in spec[key]:
             if source_path(repo, name).is_dir():
@@ -68,7 +70,13 @@ def validate(spec):
     if not isinstance(argv, list) or not argv or any(not isinstance(a, str) or not a or '\x00' in a for a in argv):
         raise ValueError('Nonempty acceptance argv required')
     for arg in argv:
-        if not Path(arg).is_absolute() and (repo / arg).is_file() and Path(arg).as_posix() in spec['writable']:
+        candidate = Path(arg)
+        if candidate.is_absolute():
+            if not candidate.is_relative_to('/workspace'):
+                continue
+            candidate = candidate.relative_to('/workspace')
+        name = relative(candidate.as_posix())
+        if name in spec['writable']:
             raise ValueError('Acceptance entry point cannot be writable')
     for key, default, maximum in [('max_calls', 12, 100), ('max_output_tokens', 2048, 16384)]:
         n = spec.setdefault(key, default)

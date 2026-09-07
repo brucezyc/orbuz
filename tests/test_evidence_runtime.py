@@ -88,7 +88,8 @@ def test_scope_guard_and_budget(project, tmp_path):
 def test_no_acceptance_or_bad_limits_rejected(project, tmp_path):
     rt = Runtime(tmp_path / 'state')
     for update in [{'acceptance': []}, {'max_calls': 0}, {'writable': ['../bad']},
-                   {'timeout': float('nan')}, {'context': ['.git/config']}]:
+            {'timeout': float('nan')}, {'context': ['.git/config']},
+            {'context': ['answer.py'] * 129}]:
         with pytest.raises(ValueError):
             rt.create(dict(contract(project), **update))
 
@@ -102,6 +103,16 @@ def test_cancel_and_retry_are_explicit(project, tmp_path):
     assert model.calls == 0
     with pytest.raises(ValueError):
         rt.run(task, model, retry=True)
+
+
+@pytest.mark.parametrize('entry', ['check.py', './check.py', '/workspace/check.py'])
+def test_acceptance_entry_aliases_cannot_be_writable(project, tmp_path, entry):
+    rt = Runtime(tmp_path / 'state')
+    spec = contract(project)
+    spec['writable'] = ['answer.py', 'check.py']
+    spec['acceptance'] = ['/usr/bin/python3', '-B', entry]
+    with pytest.raises(ValueError, match='Acceptance entry'):
+        rt.create(spec)
 
 
 def test_api_failure_never_mock_success(project, tmp_path):

@@ -36,6 +36,41 @@ def test_running_record_reconciles_without_replay(project, tmp_path):
     assert model.calls == 0
 
 
+def test_real_process_crash_reconciles_without_replay(project, tmp_path):
+    import sys
+    import time
+    rt = Runtime(tmp_path / 'state')
+    task = rt.create(contract(project))
+    marker = tmp_path / 'request-started'
+    script = '''import sys,time
+from pathlib import Path
+from orbuz.runtime.engine import Runtime
+class Waiting:
+    def complete(self, *args):
+        Path(sys.argv[3]).write_text('reserved')
+        time.sleep(30)
+Runtime(sys.argv[1]).run(sys.argv[2], Waiting())
+'''
+    proc = subprocess.Popen([sys.executable, '-c', script, str(tmp_path / 'state'), task, str(marker)])
+    try:
+        deadline = time.monotonic() + 5
+        while not marker.exists() and time.monotonic() < deadline:
+            time.sleep(0.02)
+        assert marker.exists()
+        with pytest.raises(ValueError, match='already running'):
+            rt.run(task, Scripted([]))
+        proc.kill()
+        proc.wait(timeout=5)
+        result = rt.run(task, Scripted([]))
+        assert result['status'] == 'interrupted'
+        assert result['calls'] == 1
+        assert result['elapsed_s'] > 0
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait(timeout=5)
+
+
 def test_read_symlink_escape_denied(project, tmp_path):
     (project / 'escape').symlink_to('/root/.hermes/.env')
     git(project, 'add', 'escape')

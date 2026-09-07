@@ -12,6 +12,8 @@ Date: 2026-09-07. New code is on a local feature branch; legacy runtime is prese
 - API-reported token totals: prompt 18,772; completion 2,007; total 20,779.
 - First check exposed an implementation defect; the model revised its source and reran it.
 - Runtime acceptance exited 0. Separate post-run sandbox recheck also exited 0.
+- Six independent held-out edge cases not supplied in the visible oracle also passed
+  in the sandbox (`holdout_check.py`, `holdout.log` in the trial directory).
 - Accepted candidate revision: `306d49fb6826223b4b10cedc090973b686453eef`.
 - Task: `f80d1e36a8d342599c35cdf246a3a3a5`.
 - Actual artifacts: `/root/yzhu/exports/orbuz-runtime-trial-20260907/`.
