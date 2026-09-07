@@ -60,7 +60,8 @@ def validate(spec):
             raise ValueError(key + ' must be a list')
         spec[key] = list(dict.fromkeys(relative(x) for x in values))
         for name in spec[key]:
-            source_path(repo, name)
+            if source_path(repo, name).is_dir():
+                raise ValueError('Scope/context entries must be exact files, not directories')
     if not spec['writable']:
         raise ValueError('Explicit writable files required')
     argv = spec.get('acceptance')

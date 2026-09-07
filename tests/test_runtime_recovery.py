@@ -97,6 +97,35 @@ def test_deleted_workspace_invalidates_without_exception(project, tmp_path):
     assert rt.verify(task)['status'] == 'stale'
 
 
+def test_ignored_candidate_file_is_versioned(project, tmp_path):
+    (project / '.gitignore').write_text('new.py\n')
+    git(project, 'add', '.gitignore')
+    git(project, 'commit', '-qm', 'ignore fixture')
+    rt = Runtime(tmp_path / 'state')
+    spec = contract(project)
+    spec['writable'].append('new.py')
+    result = rt.run(rt.create(spec), Scripted([
+        ('write_file', {'path': 'new.py', 'content': 'VALUE = 42\n'}),
+        ('write_file', {'path': 'answer.py', 'content': 'def answer():\n    return 42\n'}),
+        ('submit', {})]))
+    assert result['status'] == 'accepted'
+    assert 'new.py' in git(Path(result['workspace']), 'ls-files').splitlines()
+
+
+def test_ignored_injected_file_invalidates_evidence(project, tmp_path):
+    (project / '.gitignore').write_text('injected.py\n')
+    git(project, 'add', '.gitignore')
+    git(project, 'commit', '-qm', 'ignore fixture')
+    rt = Runtime(tmp_path / 'state')
+    task = rt.create(contract(project))
+    result = rt.run(task, Scripted([
+        ('write_file', {'path': 'answer.py', 'content': 'def answer():\n    return 42\n'}),
+        ('submit', {})]))
+    assert result['status'] == 'accepted'
+    (Path(result['workspace']) / 'injected.py').write_text('changed environment')
+    assert rt.verify(task)['status'] == 'stale'
+
+
 def test_cli_and_missing_key_fail_closed(project, tmp_path):
     import os
     import sys

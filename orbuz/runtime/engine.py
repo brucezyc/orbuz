@@ -51,7 +51,7 @@ class Runtime:
             evidence = task['evidence']
             try:
                 workspace = Path(task['workspace'])
-                valid = (not git(workspace, 'status', '--porcelain', '--untracked-files=all')
+                valid = (not git(workspace, 'status', '--porcelain', '--untracked-files=all', '--ignored')
                          and git(workspace, 'rev-parse', 'HEAD') == evidence['revision']
                          and digest(task['contract']) == evidence['contract_hash']
                          and environment() == evidence['environment']
@@ -116,6 +116,7 @@ class Runtime:
                     self.store.save(task)
                     response = model.complete(messages, TOOLS, spec['max_output_tokens'])
                     task['usage'].append(response.get('usage', {}))
+                    attempt['model'] = response.get('model', getattr(model, 'model', None))
                     if cancel() or remaining() <= 0:
                         task['status'] = 'cancelled' if cancel() else 'exhausted'
                         break
@@ -195,12 +196,18 @@ class Runtime:
         root = Path(task['workspace'])
         spec = task['contract']
         changed = set(git(root, 'diff', '--name-only', 'HEAD').splitlines())
-        changed |= set(git(root, 'ls-files', '--others', '--exclude-standard').splitlines())
+        changed |= set(git(root, 'ls-files', '--others').splitlines())
         if changed - set(spec['writable']):
             raise ValueError('Candidate changed protected source')
         for name in spec['writable']:
             source_path(root, name)
-        git(root, 'add', '--', *spec['writable'])
+        stage = [name for name in spec['writable'] if (root / name).exists()
+                 or git(root, 'ls-files', '--', name)]
+        if stage:
+            git(root, '--literal-pathspecs', 'add', '-f', '--', *stage)
+        staged = set(git(root, 'diff', '--cached', '--name-only', 'HEAD').splitlines())
+        if staged - set(spec['writable']):
+            raise ValueError('Staging included protected files')
         git(root, '-c', 'user.name=Orbuz Runtime', '-c', 'user.email=orbuz@localhost',
             'commit', '--allow-empty', '-m', 'Candidate for ' + task['id'])
         revision = git(root, 'rev-parse', 'HEAD')
@@ -216,7 +223,7 @@ class Runtime:
             task['status'] = 'cancelled'
         elif result['timed_out'] or result['exit_code'] != 0:
             task['status'] = 'rejected'
-        elif git(root, 'status', '--porcelain', '--untracked-files=all') or git(root, 'rev-parse', 'HEAD') != revision:
+        elif git(root, 'status', '--porcelain', '--untracked-files=all', '--ignored') or git(root, 'rev-parse', 'HEAD') != revision:
             task['status'] = 'stale'
         else:
             task['status'] = 'accepted'

@@ -27,7 +27,7 @@ def project(tmp_path):
     return root
 
 
-def contract(project):
+def contract(project) -> dict:
     return dict(goal='Make answer return 42', repository=str(project),
                 writable=['answer.py'], context=['answer.py', 'check.py'],
                 acceptance=['/usr/bin/python3', '-B', 'check.py'],

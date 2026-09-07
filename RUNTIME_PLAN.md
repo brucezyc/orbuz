@@ -1,6 +1,7 @@
 # Evidence runtime implementation
 
-Status: implementation in progress; legacy runtime is preserved, not repaired.
+Status: first executable slice implemented and exercised; legacy runtime is preserved, not repaired.
+Actual results: [RUNTIME_VERIFICATION.md](RUNTIME_VERIFICATION.md).
 
 ## Accepted direction
 
