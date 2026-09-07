@@ -14,7 +14,8 @@ bounded task at a time, not the whole planned multi-agent architecture.
    submit candidate or report blocked. Plain completion text never marks success.
 5. On submit, commit the candidate and run the fixed acceptance argv. Save output,
    exit code, timeout/cancellation, revision, contract hash, environment fingerprint,
-   log hash and candidate patch. Accept only after an actual successful check.
+   log hash, patch hash, base revision and byte-exact candidate patch. Accept only
+   after an actual successful check. Empty diffs produce zero-byte no-op patches.
 6. Persist status and attempt history in SQLite. Explicit retry starts a new candidate
    from the original base, includes previous failure evidence and retains cumulative
    call/time budgets. No command replay and no automatic merge/push/deploy.
@@ -65,6 +66,13 @@ fallback. Runtime `run/retry/verify` return nonzero unless accepted. `status` is
 inspection operation; it does not itself rerun checks. `verify` checks saved-evidence
 freshness, **not** behavioral re-execution. A cancelled task cannot be retried;
 create a new authorized task instead.
+
+Repeated `run` also checks accepted-evidence freshness before returning, without
+spending another model call. It checks patch bytes/hash against base→candidate Git
+diff and ancestry, original contract hash, candidate HEAD/source, log and environment.
+Old records without patch hash/base fields become `stale`; `status` still shows
+the stored historical status until a freshness check. A zero-byte patch is applied
+as a no-op (`git apply --allow-empty`); other patches use normal `git apply`.
 
 Example contract (repository must already exist and be committed):
 

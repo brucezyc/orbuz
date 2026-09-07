@@ -42,7 +42,7 @@ A second fresh real-API trial on runtime commit `5e002b5` also accepted:
 ```
 
 Initial missing-module red test was observed before implementation; the first six
-runtime tests subsequently passed. Latest full regression: **50 passed**. This includes
+runtime tests subsequently passed. Earlier full regression: **50 passed**. This includes
 transport mocks (explicitly marked), actual SIGKILL recovery, acceptance aliases,
 ignored-file evidence invalidation and scoped full-log retrieval.
 
@@ -84,6 +84,32 @@ can renew into a protocol-valid brief; an oversized immutable brief fails before
 request is reserved. Tests cover initial oversize, non-ASCII text, renewed history,
 status propagation and actual local socket closure. No paid calls were made.
 Evidence: `/root/yzhu/exports/orbuz_request_budget_green_20260907.log`.
+
+## Delivery and oracle review closure (offline resumption)
+
+On commits `daf266c` (delivery) and `deb8439` (oracle), the stable combined suite
+passed **106 tests in 12.98s**. Log:
+`/root/yzhu/exports/orbuz_resume_full_20260907.log`.
+
+- 35 delivery regressions exercise actual Git patch application and candidate tree
+  equality: trailing blank lines, CRLF, binary, additions/deletions, ignored files,
+  zero-byte no-op patches and Chinese/newline/whitespace paths.
+- Patch bytes are not text-normalized; SHA256 and base revision are recorded.
+  Freshness requires the original contract hash, candidate HEAD, base ancestry,
+  exact regenerated binary patch, log hash, environment and clean source.
+- Repeated `run` verifies accepted evidence under the existing task lock before
+  returning, even with a cancellation flag. Stale returns consume no model calls.
+- The independent review's O1/O2/O3 were reproduced as three failing regressions:
+  integer-to-float input mutation, wrong pending-case total and accepted empty status.
+  Recursive type-sensitive comparison and complete fixture assertions close these
+  cases. The oracle now has 11 passing tests, not a proof of every possible input.
+- Both saved real-model candidates passed the final oracle unchanged. New evidence:
+  `/root/yzhu/exports/orbuz-resume-recheck-ympdxjfy/result.json`; original trial
+  artifacts and previous recheck logs were not overwritten. No paid calls.
+
+Older accepted records without patch hash/base fields fail freshness checks rather
+than being silently grandfathered in. Local state storage is trusted; these checks
+are not authentication against a host user rewriting all state and evidence.
 
 ## Not delivered
 

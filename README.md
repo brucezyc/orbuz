@@ -16,6 +16,10 @@ version-bound acceptance loop, its tests, CLI and explicit limitations.
 [Implementation plan](RUNTIME_PLAN.md) tracks the remaining dynamic decomposition
 and multi-task work. No automatic production migration or deployment is performed.
 
+Current local verification: [RUNTIME_VERIFICATION.md](RUNTIME_VERIFICATION.md).
+The offline delivery hardening covers byte-exact patches, stale evidence and trial
+oracle negative cases; it does not establish production or hostile-code readiness.
+
 **The sections below describe the legacy role/stage workflow.** Its historical
 feature descriptions are not evidence that the current legacy CLI delivers code.
 
