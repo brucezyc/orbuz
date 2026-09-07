@@ -8,6 +8,17 @@
 
 ---
 
+## New evidence runtime (experimental)
+
+The AI-oriented redesign is implemented separately under `orbuz/runtime/`.
+Start with [RUNTIME.md](RUNTIME.md) for the executable task → isolated attempt →
+version-bound acceptance loop, its tests, CLI and explicit limitations.
+[Implementation plan](RUNTIME_PLAN.md) tracks the remaining dynamic decomposition
+and multi-task work. No automatic production migration or deployment is performed.
+
+**The sections below describe the legacy role/stage workflow.** Its historical
+feature descriptions are not evidence that the current legacy CLI delivers code.
+
 Facilitates multi-agent workflows using your own LLM API key. The orchestrator decomposes a goal into stages, dispatches agents in parallel or sequence, and synthesizes results.
 
 Built-in patterns: **fanout** (parallel agents + merge), **pipeline** (sequential chaining), **producer-reviewer** (generate → review → cycle), **codegen** (sequential codegen agents with file write + compile actions).
