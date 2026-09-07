@@ -30,6 +30,21 @@ plus tools have a 100KB UTF-8 boundary. Custom synchronous adapters retain docum
 limits. Patch replay/freshness regression evidence and current Concept progress are
 recorded in RUNTIME_VERIFICATION.md; do not infer them from old live-trial acceptance.
 
+## Concept minimum integration (separate experimental API)
+
+Sibling repository `../concept-decomposer` retains its legacy engine and adds
+`src/concept_decomposer/runtime_plan.py`: immutable versioned snapshots, explicit
+split/merge/replan, strict DAG checks, caller-authorized runtime contracts and
+single-parent serial candidate chains. Dependency or plan changes invalidate
+current bindings; historical runtime records remain inspectable.
+
+Parent execution: 24 repository tests and 4 supplemental boundary cases passed
+against the hardened runtime. See that repository's `PARENT_VERIFICATION.md`.
+Its separate independent execution is approval-blocked, documented in
+`RUNTIME_VERIFICATION.md`; not an independent green sign-off. The bridge is
+in-memory and single-owner. Evidence refs are caller-supplied, not automatically
+investigated or authenticated. No original-repository writes or automatic merge.
+
 ## Later stages (not included in first slice)
 
-Dynamic Concept Decomposer (investigate/split/merge/replan with versioned contracts); dependency invalidation and integration across multiple tasks; parallel exploration; calibrated cost routing and same-model/same-budget multi-agent baseline evaluation; production resource quotas/cgroups and non-Linux runners. Do not report these complete based on a single-task trial.
+Automatic investigation and model-driven dynamic planning; independent Concept execution sign-off; persistent bridge recovery; multi-parent integration and parallel exploration; calibrated cost routing and same-model/same-budget multi-agent baseline evaluation; production resource quotas/cgroups and non-Linux runners. Do not report these complete based on single-task trials or scripted serial integration.

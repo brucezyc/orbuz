@@ -111,8 +111,16 @@ Older accepted records without patch hash/base fields fail freshness checks rath
 than being silently grandfathered in. Local state storage is trusted; these checks
 are not authentication against a host user rewriting all state and evidence.
 
+Independent read-only review reran the full suite: **106 passed in 13.22s**,
+plus four supplemental boundary cases. Report and source hashes:
+`/root/yzhu/exports/orbuz_delivery_independent_resume_20260907.md`.
+Parent rechecked the three source SHA256 values against that report; they match.
+
 ## Not delivered
 
-No deployment, multi-task graph, dynamic Concept integration, parallel candidates,
-automatic integration, pricing model/dollar cap, cgroups quotas or production
-reliability claim. See RUNTIME.md and RUNTIME_PLAN.md for exact boundaries.
+No deployment, automatic investigation/model-driven planning, multi-parent
+integration, parallel candidates, automatic merge, pricing model/dollar cap,
+cgroups quotas or production reliability claim. The separate Concept Python API
+now has parent-tested versioned planning and single-parent serial integration;
+its independent execution is still approval-blocked. See RUNTIME_PLAN.md and
+the sibling Concept PARENT_VERIFICATION.md for precise scope and evidence.

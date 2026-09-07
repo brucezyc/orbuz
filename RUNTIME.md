@@ -145,6 +145,9 @@ multi-agent efficiency.
 
 ## Remaining architecture work
 
-See [RUNTIME_PLAN.md](RUNTIME_PLAN.md). Dynamic Concept Decomposer, task split/merge,
-dependency-aware invalidation, multi-task integration, parallel candidates and
-same-model/same-budget comparison remain pending. No production deployment.
+See [RUNTIME_PLAN.md](RUNTIME_PLAN.md). The sibling Concept Decomposer now provides
+an experimental versioned-plan Python API with explicit split/merge/replan and
+single-parent serial candidate chaining; parent-run offline integration tests pass.
+Its independent reviewer execution remains approval-blocked. Automatic investigation,
+LLM-driven planning, multi-parent integration, parallel candidates and same-model/
+same-budget comparison remain pending. No production deployment.
