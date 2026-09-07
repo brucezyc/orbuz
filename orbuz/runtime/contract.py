@@ -12,10 +12,25 @@ def digest(value):
     return hashlib.sha256(json.dumps(value, sort_keys=True, allow_nan=False).encode()).hexdigest()
 
 
-def git(root, *args):
+def git_bytes(root, *args):
     return subprocess.check_output(
         ['git', '-c', 'core.hooksPath=/dev/null', '-c', 'commit.gpgsign=false',
-         '-C', str(root), *args], text=True, stderr=subprocess.PIPE).strip()
+         '-C', str(root), *args], stderr=subprocess.PIPE)
+
+
+def git(root, *args):
+    return git_bytes(root, *args).decode().strip()
+
+
+def git_paths(root, *args):
+    return {p.decode('utf-8', 'surrogateescape') for p in git_bytes(root, *args).split(b'\0') if p}
+
+
+def candidate_patch(root, base, revision):
+    return git_bytes(root, '-c', 'diff.noprefix=false', '-c', 'diff.context=3',
+                     'diff', '--binary', '--full-index', '--no-ext-diff', '--no-textconv',
+                     '--no-color', '--no-renames', '--src-prefix=a/', '--dst-prefix=b/',
+                     base, revision, '--')
 
 
 def relative(name):

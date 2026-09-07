@@ -7,7 +7,7 @@ import uuid
 from contextlib import contextmanager
 from pathlib import Path
 
-from orbuz.runtime.contract import digest, environment, git, source_path, validate
+from orbuz.runtime.contract import candidate_patch, digest, environment, git, git_paths, source_path, validate
 from orbuz.runtime.request_budget import bounded_context
 from orbuz.runtime.sandbox import execute
 from orbuz.runtime.store import Store
@@ -46,27 +46,39 @@ class Runtime:
 
     def verify(self, task_id):
         with self.lock(task_id):
-            task = self.store.load(task_id)
-            if task['status'] != 'accepted':
-                return task
-            evidence = task['evidence']
-            try:
-                workspace = Path(task['workspace'])
-                valid = (not git(workspace, 'status', '--porcelain', '--untracked-files=all', '--ignored')
-                         and git(workspace, 'rev-parse', 'HEAD') == evidence['revision']
-                         and digest(task['contract']) == evidence['contract_hash']
-                         and environment() == evidence['environment']
-                         and hashlib.sha256(Path(evidence['log_path']).read_bytes()).hexdigest() == evidence['log_hash'])
-            except Exception:
-                valid = False
-            if not valid:
-                task['status'] = 'stale'
-                self.store.save(task)
+            return self._verify(self.store.load(task_id))
+
+    def _verify(self, task):
+        # Caller holds the task lock, including repeated run() inspection.
+        if task['status'] != 'accepted':
             return task
+        try:
+            evidence = task['evidence']
+            workspace = Path(task['workspace'])
+            base = task['contract']['base_revision']
+            patch = Path(evidence['patch_path']).read_bytes()
+            valid = (not git(workspace, 'status', '--porcelain', '--untracked-files=all', '--ignored')
+                     and git(workspace, 'rev-parse', 'HEAD') == evidence['revision']
+                     and digest(task['contract']) == task['contract_hash'] == evidence['contract_hash']
+                     and base == evidence['base_revision']
+                     and hashlib.sha256(patch).hexdigest() == evidence['patch_hash']
+                     and patch == candidate_patch(workspace, base, evidence['revision'])
+                     and environment() == evidence['environment']
+                     and hashlib.sha256(Path(evidence['log_path']).read_bytes()).hexdigest() == evidence['log_hash'])
+            if valid:
+                git(workspace, 'merge-base', '--is-ancestor', base, evidence['revision'])
+        except Exception:
+            valid = False
+        if not valid:
+            task['status'] = 'stale'
+            self.store.save(task)
+        return task
 
     def run(self, task_id, model, retry=False):
         with self.lock(task_id):
             task = self.store.load(task_id)
+            if task['status'] == 'accepted':
+                return self._verify(task)
             if task['cancel_requested']:
                 if retry:
                     raise ValueError('Cancelled tasks require a new task contract')
@@ -217,17 +229,17 @@ class Runtime:
     def accept(self, task, attempt_dir, cancel, remaining):
         root = Path(task['workspace'])
         spec = task['contract']
-        changed = set(git(root, 'diff', '--name-only', 'HEAD').splitlines())
-        changed |= set(git(root, 'ls-files', '--others').splitlines())
+        changed = git_paths(root, 'diff', '--name-only', '-z', 'HEAD')
+        changed |= git_paths(root, 'ls-files', '--others', '-z')
         if changed - set(spec['writable']):
             raise ValueError('Candidate changed protected source')
         for name in spec['writable']:
             source_path(root, name)
         stage = [name for name in spec['writable'] if (root / name).exists()
-                 or git(root, 'ls-files', '--', name)]
+                 or git_paths(root, '--literal-pathspecs', 'ls-files', '-z', '--', name)]
         if stage:
             git(root, '--literal-pathspecs', 'add', '-f', '--', *stage)
-        staged = set(git(root, 'diff', '--cached', '--name-only', 'HEAD').splitlines())
+        staged = git_paths(root, 'diff', '--cached', '--name-only', '-z', 'HEAD')
         if staged - set(spec['writable']):
             raise ValueError('Staging included protected files')
         git(root, '-c', 'user.name=Orbuz Runtime', '-c', 'user.email=orbuz@localhost',
@@ -239,7 +251,10 @@ class Runtime:
         evidence = dict(result, revision=revision, contract_hash=digest(spec), environment=env)
         evidence['log_hash'] = hashlib.sha256(Path(result['log_path']).read_bytes()).hexdigest()
         evidence['patch_path'] = str(attempt_dir / 'candidate.patch')
-        Path(evidence['patch_path']).write_text(git(root, 'diff', '--binary', spec['base_revision'], revision) + '\n')
+        patch = candidate_patch(root, spec['base_revision'], revision)
+        Path(evidence['patch_path']).write_bytes(patch)
+        evidence['patch_hash'] = hashlib.sha256(patch).hexdigest()
+        evidence['base_revision'] = spec['base_revision']
         task['evidence'] = evidence
         if result['cancelled'] or cancel():
             task['status'] = 'cancelled'
