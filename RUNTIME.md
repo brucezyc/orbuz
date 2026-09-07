@@ -96,6 +96,15 @@ may delay cancellation until it returns/times out.
 - The model cannot mark a task accepted or directly rewrite SQLite/check results.
 - Commands cannot write source; the acceptance entry-point path cannot be allowlisted
   as writable. The contract author must also protect helper/oracle dependencies.
+- An arbitrary acceptance command can be flawed: importing candidate code in the
+  assertion-owning interpreter allows `os._exit(0)` to skip checks. The summary trial
+  now imports it in child processes; the protected parent validates returned JSON,
+  types, expected values and nonmutation, rejecting missing/forged PASS text. Parent
+  process memory/fd access is disabled (`PR_SET_DUMPABLE=0`); killing the parent fails
+  acceptance. This fixture-specific oracle is not a generic hostile-code proof:
+  candidates can see its source and can fake child responses or hardcode examples.
+  The runtime cannot make an arbitrary weak oracle sound; independent held-out
+  checks and oracle review remain necessary.
 - Source/HEAD/contract/log/environment changes invalidate saved acceptance.
 - Environment fingerprint covers platform, selected executable hashes and sandbox
   policy, not every system library. This is not a hermetic reproducible-build proof.

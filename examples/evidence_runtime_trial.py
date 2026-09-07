@@ -15,7 +15,50 @@ from orbuz.runtime.model import ChatModel
 SEED = '''def summarize(records):
     raise NotImplementedError("Implement the task contract")
 '''
-ORACLE = '''from summary import summarize
+ORACLE = '''import ctypes
+import json
+import subprocess
+import sys
+
+# Keep candidate imports outside the assertion-owning interpreter. Linux parent
+# memory/fd access is denied; killing this parent fails acceptance, never passes.
+if ctypes.CDLL(None).prctl(4, 0, 0, 0, 0) != 0:
+    raise RuntimeError("Cannot protect oracle parent")
+CHILD = """import json, sys
+records = json.loads(sys.stdin.read())
+from summary import summarize
+try:
+    result = summarize(records)
+except ValueError:
+    response = {'error': 'ValueError'}
+else:
+    response = {'result': result, 'after': records}
+print(json.dumps(response, allow_nan=False))
+"""
+
+def summarize(records):
+    proc = subprocess.run([sys.executable, '-B', '-c', CHILD],
+                          input=json.dumps(records), text=True, capture_output=True,
+                          timeout=2, close_fds=True)
+    assert proc.returncode == 0, ('candidate child failed', proc.returncode)
+    # Exit zero without a complete machine-readable result is failure.
+    try:
+        response = json.loads(proc.stdout)
+    except ValueError as exc:
+        raise AssertionError('candidate returned no valid JSON result') from exc
+    if response == {'error': 'ValueError'}:
+        raise ValueError()
+    assert isinstance(response, dict) and set(response) == {'result', 'after'}
+    assert response['after'] == records, 'input mutation'
+    result = response['result']
+    assert isinstance(result, dict) and set(result) == {'total', 'statuses', 'prompt_tokens', 'completion_tokens'}
+    for key in ('total', 'prompt_tokens', 'completion_tokens'):
+        assert type(result[key]) is int and result[key] >= 0
+    assert isinstance(result['statuses'], dict)
+    assert all(isinstance(key, str) and key and type(value) is int and value > 0
+               for key, value in result['statuses'].items())
+    return result
+
 r = summarize([
     {"status": "accepted", "usage": [{"prompt_tokens": 10, "completion_tokens": 4}]},
     {"status": "rejected", "usage": [{"prompt_tokens": 7, "completion_tokens": 3}]},
