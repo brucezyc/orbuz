@@ -22,6 +22,9 @@ def test_early_exit_or_fake_success_rejected(tmp_path, source):
 
 @pytest.mark.parametrize('change,accepted', [
     ('', True),
+    ("\n_original = summarize\ndef summarize(records):\n    result = _original(records)\n    for record in records:\n        for entry in record.get('usage', []):\n            for key in entry:\n                entry[key] = float(entry[key])\n    return result\n", False),
+    ("\n_original = summarize\ndef summarize(records):\n    result = _original(records)\n    if records and records[0]['status'] == 'pending': result['total'] = 999\n    return result\n", False),
+    ("\n_original = summarize\ndef summarize(records):\n    if records == [{'status': ''}]:\n        return dict(total=1, statuses={}, prompt_tokens=0, completion_tokens=0)\n    return _original(records)\n", False),
     ("\n_original = summarize\ndef summarize(records):\n    result = _original(records)\n    result['total'] = float(result['total'])\n    return result\n", False),
     ("\n_original = summarize\ndef summarize(records):\n    try: return _original(records)\n    except ValueError:\n        import os\n        os._exit(0)\n", False),
 ])

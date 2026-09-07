@@ -36,6 +36,15 @@ else:
 print(json.dumps(response, allow_nan=False))
 """
 
+def same_value(left, right):
+    if type(left) is not type(right):
+        return False
+    if isinstance(left, dict):
+        return left.keys() == right.keys() and all(same_value(left[k], right[k]) for k in left)
+    if isinstance(left, list):
+        return len(left) == len(right) and all(same_value(a, b) for a, b in zip(left, right))
+    return left == right
+
 def summarize(records):
     proc = subprocess.run([sys.executable, '-B', '-c', CHILD],
                           input=json.dumps(records), text=True, capture_output=True,
@@ -49,7 +58,7 @@ def summarize(records):
     if response == {'error': 'ValueError'}:
         raise ValueError()
     assert isinstance(response, dict) and set(response) == {'result', 'after'}
-    assert response['after'] == records, 'input mutation'
+    assert same_value(response['after'], records), 'input mutation'
     result = response['result']
     assert isinstance(result, dict) and set(result) == {'total', 'statuses', 'prompt_tokens', 'completion_tokens'}
     for key in ('total', 'prompt_tokens', 'completion_tokens'):
@@ -69,11 +78,9 @@ assert r == {"total": 4, "statuses": {"accepted": 2, "rejected": 1, "failed": 1}
              "prompt_tokens": 17, "completion_tokens": 7}, r
 assert summarize([]) == {"total": 0, "statuses": {}, "prompt_tokens": 0, "completion_tokens": 0}
 original = [{"status": "pending", "usage": [{"prompt_tokens": 2}]}]
-import copy
-before = copy.deepcopy(original)
-assert summarize(original)["completion_tokens"] == 0
-assert original == before
-for bad in [None, {}, [None], [{}], [{"status": 1}], [{"status": "x", "usage": None}],
+assert summarize(original) == {"total": 1, "statuses": {"pending": 1},
+                              "prompt_tokens": 2, "completion_tokens": 0}
+for bad in [None, {}, [None], [{}], [{"status": ""}], [{"status": 1}], [{"status": "x", "usage": None}],
             [{"status": "x", "usage": [{"prompt_tokens": -1}]}],
             [{"status": "x", "usage": [{"prompt_tokens": True}]}],
             [{"status": "x", "usage": [{"completion_tokens": 1.5}]}]]:
