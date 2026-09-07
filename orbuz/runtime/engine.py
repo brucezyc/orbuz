@@ -8,6 +8,7 @@ from contextlib import contextmanager
 from pathlib import Path
 
 from orbuz.runtime.contract import digest, environment, git, source_path, validate
+from orbuz.runtime.request_budget import bounded_context
 from orbuz.runtime.sandbox import execute
 from orbuz.runtime.store import Store
 from orbuz.runtime.tools import TOOLS, dispatch
@@ -111,10 +112,23 @@ class Runtime:
                     if cancel():
                         task['status'] = 'cancelled'
                         break
+                    messages = bounded_context(messages, TOOLS, lambda: self.context(task))
                     # Reserve before request: interrupted/failed calls still consume budget.
                     task['calls'] += 1
                     self.store.save(task)
-                    response = model.complete(messages, TOOLS, spec['max_output_tokens'])
+                    if hasattr(model, 'complete_bounded'):
+                        try:
+                            response = model.complete_bounded(messages, TOOLS, spec['max_output_tokens'],
+                                                              remaining=remaining(), cancel=cancel)
+                        except InterruptedError:
+                            task['status'] = 'cancelled'
+                            break
+                        except TimeoutError:
+                            task['status'] = 'exhausted'
+                            break
+                    else:
+                        # Compatibility for trusted offline scripted adapters only.
+                        response = model.complete(messages, TOOLS, spec['max_output_tokens'])
                     task['usage'].append(response.get('usage', {}))
                     attempt['model'] = response.get('model', getattr(model, 'model', None))
                     if cancel() or remaining() <= 0:

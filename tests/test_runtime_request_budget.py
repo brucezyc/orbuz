@@ -39,6 +39,30 @@ def test_runtime_http_deadline_becomes_exhausted(project,tmp_path):
     assert result['status']=='exhausted'
 
 
+def test_runtime_real_chat_transport_deadline(project,tmp_path,monkeypatch):
+    import asyncio
+    import httpx
+    from orbuz.runtime.model import ChatModel
+    monkeypatch.setenv('ORBUZ_TEST_KEY','test-only')
+    rt=Runtime(tmp_path/'state');spec=contract(project);spec['max_seconds']=.3
+    task_id=rt.create(spec)
+    stopped=[]
+    async def handler(request):
+        try:await asyncio.sleep(10)
+        finally:stopped.append(True)
+        return httpx.Response(200,json={})
+    original=httpx.AsyncClient
+    monkeypatch.setattr(httpx,'AsyncClient',lambda **kw:original(transport=httpx.MockTransport(handler),**kw))
+    model=ChatModel('test','https://example.invalid','ORBUZ_TEST_KEY')
+    start=time.monotonic()
+    try:result=rt.run(task_id,model)
+    finally:model.close()
+    assert result['status']=='exhausted'
+    assert result['calls']==1 and not result['usage']
+    assert time.monotonic()-start < 1
+    assert stopped==[True]
+
+
 def test_utf8_request_budget_counts_tools_and_non_ascii(project,tmp_path):
     import json
     rt=Runtime(tmp_path/'state');spec=contract(project)
