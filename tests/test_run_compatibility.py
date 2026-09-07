@@ -34,11 +34,70 @@ def test_architect_tier_credentials_follow_selected_model():
     client = LLMClient(models={"architect": "deepseek/deepseek-v4-flash"},
                        tier_config={"architect": {"api_key": "test-architect-key",
                                                   "api_base": "https://example.invalid/v1"}})
-    resolved = client.catalog.resolve(client.get_model_name("architect"))
+    bound = client._bound_ids["architect"]
+    resolved = client.catalog.resolve(bound)
     assert not client.mock
     assert resolved is not None
     assert resolved.api_key == "test-architect-key"
     assert resolved.base_url == "https://example.invalid/v1"
+    client.close()
+
+
+def test_missing_higher_tiers_fall_downward():
+    client = LLMClient(
+        models={"balanced": "gpt-5.6-sol", "cheap": "Qwen/Qwen3.8-27B"},
+        tier_config={
+            "balanced": {"api_key": "k-bal", "api_base": "https://example.invalid/v1"},
+            "cheap": {"api_key": "k-cheap", "api_base": "https://example.invalid/v1"},
+        },
+    )
+    assert client.resolve_tier("architect") == "balanced"
+    assert client.resolve_tier("quality") == "balanced"
+    assert client.get_model_name("architect") == "gpt-5.6-sol"
+    resolved = client.catalog.resolve(client._bound_ids["balanced"])
+    assert resolved is not None
+    assert resolved.api_key == "k-bal"
+    assert not client.mock
+    client.close()
+
+
+def test_unqualified_model_binds_own_credentials():
+    client = LLMClient(
+        models={"quality": "gpt-6-astra"},
+        tier_config={"quality": {"api_key": "k-q", "api_base": "https://example.invalid/v1"}},
+    )
+    bound = client._bound_ids["quality"]
+    resolved = client.catalog.resolve(bound)
+    assert bound == "tier-quality/gpt-6-astra"
+    assert resolved is not None
+    assert resolved.api_id == "gpt-6-astra"
+    assert resolved.api_key == "k-q"
+    assert resolved.base_url == "https://example.invalid/v1"
+    assert not client.mock
+    client.close()
+
+
+def test_failed_call_falls_to_next_configured_tier():
+    client = LLMClient(
+        models={"quality": "bad-model", "balanced": "ok-model"},
+        tier_config={
+            "quality": {"api_key": "k-q", "api_base": "https://example.invalid/v1"},
+            "balanced": {"api_key": "k-b", "api_base": "https://example.invalid/v1"},
+        },
+    )
+    seen = []
+
+    def fake_direct(model_id, *args, **kwargs):
+        seen.append(model_id)
+        if "bad-model" in model_id:
+            return LLMResponse(content="", success=False, error="channel failed")
+        return LLMResponse(content="OK", success=True, model=model_id)
+
+    client._chat_direct = fake_direct
+    resp = client.chat("quality", system="s", messages=[{"role": "user", "content": "hi"}])
+    assert resp.success
+    assert resp.content == "OK"
+    assert seen == ["tier-quality/bad-model", "tier-balanced/ok-model"]
     client.close()
 
 

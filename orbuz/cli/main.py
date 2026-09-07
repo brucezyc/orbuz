@@ -204,8 +204,11 @@ def _cmd_run(args):
     tier_config = {}
     for tier in ("architect", "quality", "balanced", "cheap"):
         cfg = {}
+        m = getattr(args, f"{tier}_model", None)
         k = getattr(args, f"{tier}_api_key", None)
         b = getattr(args, f"{tier}_api_base", None)
+        if m:
+            cfg["model_id"] = m
         if k:
             cfg["api_key"] = k
         if b:

@@ -33,6 +33,9 @@ import httpx
 from orbuz.llm.catalog import Catalog, ResolvedModel, DEFAULT_MODELS, build_catalog
 from orbuz.llm.provider import EndpointType
 
+# Higher first. Missing or failed tiers walk this list downward.
+TIER_ORDER = ("architect", "quality", "balanced", "cheap")
+
 
 # ── Call result ──
 
@@ -108,7 +111,7 @@ class LLMClient:
     config, then the client calls the appropriate API format.
     """
 
-    TIERS = ("architect", "quality", "balanced", "cheap")
+    TIERS = TIER_ORDER
 
     def __init__(self, models: dict[str, str] | None = None,
                  api_key: str | None = None,
@@ -136,38 +139,29 @@ class LLMClient:
             if not prov.base_url and global_base:
                 prov.base_url = global_base
 
-        # Apply per-tier overrides from CLI args
         tier_config = tier_config or {}
         self.tier_config = tier_config
+        models = models or {}
+        explicit: dict[str, str] = {}
         for tier in self.TIERS:
-            tc = tier_config.get(tier, {})
-            model_id = tc.get("model_id") or (models or {}).get(tier) or DEFAULT_MODELS.get(tier)
-            if model_id and (tc.get("api_key") or tc.get("api_base")):
-                pid = Catalog.parse_model_id(model_id)[0]
-                prov = self.catalog.get_provider(pid)
-                if prov:
-                    if tc.get("api_key"):
-                        prov.api_key = tc["api_key"]
-                    if tc.get("api_base"):
-                        prov.base_url = tc["api_base"]
-
-        # Set tier -> model mapping
-        self.tier_models: dict[str, str] = {}
-        if models:
-            # Filter out None values so defaults still apply
-            for k, v in models.items():
-                if v is not None:
-                    self.tier_models[k] = v
-        for tier in self.TIERS:
-            if tier not in self.tier_models:
-                default = DEFAULT_MODELS.get(tier, "")
-                self.tier_models[tier] = default
-
-        self.mock = mock
-        if not self.mock and self._has_any_key():
-            self.mock = False
+            model_id = (tier_config.get(tier) or {}).get("model_id") or models.get(tier)
+            if model_id:
+                explicit[tier] = model_id
+        if explicit:
+            self.tier_models = explicit
         else:
-            self.mock = True
+            self.tier_models = {tier: DEFAULT_MODELS[tier] for tier in self.TIERS}
+
+        # Bind each configured model so unknown IDs still carry their own key/base.
+        self._bound_ids: dict[str, str] = {}
+        for tier, model_id in list(self.tier_models.items()):
+            tc = tier_config.get(tier) or {}
+            self._bound_ids[tier] = self._bind_model(
+                tier, model_id, tc.get("api_key") or "", tc.get("api_base") or "",
+                global_key, global_base,
+            )
+
+        self.mock = mock or not self._has_any_key()
         self._call_count = 0
 
         # Guardrails setup
@@ -187,15 +181,64 @@ class LLMClient:
     def set_model(self, tier: str, model_id: str):
         """Set the model for a tier (e.g., 'balanced' -> 'anthropic/claude-sonnet-4')."""
         self.tier_models[tier] = model_id
+        tc = self.tier_config.get(tier) or {}
+        self._bound_ids[tier] = self._bind_model(
+            tier, model_id, tc.get("api_key") or "", tc.get("api_base") or "",
+            _resolve_global_key(), _resolve_global_base(),
+        )
+
+    def _bind_model(self, tier: str, model_id: str, api_key: str, api_base: str,
+                    global_key: str, global_base: str) -> str:
+        """Register a possibly unknown model so its own credentials are used."""
+        pid, name = Catalog.parse_model_id(model_id)
+        if not pid:
+            pid = f"tier-{tier}"
+            name = model_id
+            bound_id = f"{pid}/{name}"
+        else:
+            bound_id = model_id
+        key = api_key or global_key
+        base = api_base or global_base
+        prov = self.catalog.get_provider(pid)
+        if prov is None:
+            prov = self.catalog.add_provider(pid, api_key=key, base_url=base)
+        else:
+            if key:
+                prov.api_key = key
+            if base:
+                prov.base_url = base
+        if name not in prov.models:
+            prov.add_model(name, api_id=name, family=name)
+        return bound_id
 
     def _has_any_key(self) -> bool:
         for prov in self.catalog.all_providers():
             if prov.api_key:
                 return True
+        for tc in self.tier_config.values():
+            if tc.get("api_key"):
+                return True
         return False
 
+    def configured_tiers(self) -> list[str]:
+        """Tiers that have an explicit model mapping, higher first."""
+        return [t for t in self.TIERS if t in self.tier_models]
+
+    def resolve_tier(self, requested: str) -> str | None:
+        """Walk architect → quality → balanced → cheap from the requested tier."""
+        if requested not in self.TIERS:
+            requested = "architect"
+        start = self.TIERS.index(requested)
+        for tier in self.TIERS[start:]:
+            if tier in self.tier_models:
+                return tier
+        return None
+
     def get_model_name(self, tier: str) -> str:
-        return self.tier_models.get(tier, "")
+        resolved = self.resolve_tier(tier)
+        if resolved is None:
+            return ""
+        return self.tier_models.get(resolved, "")
 
     def get_cost_summary(self) -> dict:
         """Return per-tier cost and total cost for all calls this session."""
@@ -230,26 +273,39 @@ class LLMClient:
 
         Returns LLMResponse.
         """
-        model_id = self.tier_models.get(model_tier, model_tier)
-        self._call_count += 1
-
-        if self.mock:
-            return self._mock_call(model_id, system, messages)
-
-        resolved = self.catalog.resolve(model_id)
-
-        # Wrap the call with guardrails if enabled
-        if self.guardrails_enabled and self._guardrails:
-            return self._chat_with_guardrails(
-                model_id, system, messages, temperature, max_tokens,
-                stream, on_chunk, response_format, resolved, tools,
-            )
-
-        # Normal call (no guardrails)
-        return self._chat_direct(
-            model_id, system, messages, temperature, max_tokens,
-            stream, on_chunk, response_format, resolved, tools,
-        )
+        if requested := self.resolve_tier(model_tier):
+            start = self.TIERS.index(requested)
+        elif model_tier in self.TIERS:
+            start = self.TIERS.index(model_tier)
+        else:
+            start = 0
+        last = LLMResponse(content="", success=False, error=f"no configured tier at or below {model_tier}")
+        for tier in self.TIERS[start:]:
+            if tier not in self.tier_models:
+                continue
+            bound_id = self._bound_ids.get(tier) or self.tier_models[tier]
+            self._call_count += 1
+            if self.mock:
+                return self._mock_call(bound_id, system, messages)
+            resolved = self.catalog.resolve(bound_id)
+            if self.guardrails_enabled and self._guardrails:
+                resp = self._chat_with_guardrails(
+                    bound_id, system, messages, temperature, max_tokens,
+                    stream, on_chunk, response_format, resolved, tools,
+                )
+            else:
+                resp = self._chat_direct(
+                    bound_id, system, messages, temperature, max_tokens,
+                    stream, on_chunk, response_format, resolved, tools,
+                )
+            if resp is None:
+                last = LLMResponse(content="", success=False, error="empty LLM response")
+                continue
+            if resp.success:
+                resp.model = resp.model or bound_id
+                return resp
+            last = resp
+        return last
 
     def _chat_direct(self, model_id, system, messages, temperature,
                      max_tokens, stream, on_chunk, response_format, resolved,

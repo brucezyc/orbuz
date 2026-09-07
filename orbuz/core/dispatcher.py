@@ -247,7 +247,9 @@ class Dispatcher:
 
         # Use response_format for structured JSON output when the model supports it
         # (OpenAI-compatible APIs). Avoid for Anthropic native API which lacks this.
-        resolved = self.llm.catalog.resolve(self.llm.get_model_name(tier))
+        used = self.llm.resolve_tier(tier) or tier
+        bound = self.llm._bound_ids.get(used) or self.llm.get_model_name(tier)
+        resolved = self.llm.catalog.resolve(bound)
         use_json_mode = use_structured and resolved and resolved.is_openai_compatible
 
         response_format = {"type": "json_object"} if use_json_mode else None
@@ -711,7 +713,7 @@ class Dispatcher:
         """
         Escalation chain, respecting retry_on_failure:
           1. If retry_on_failure="never" → return failure immediately
-          2. Retry at a higher tier (e.g., cheap→balanced→quality)
+          2. Retry at the next lower configured tier (architect→quality→balanced→cheap)
           3. If reentrant=True → flag for decomposition (handled by the caller)
           4. All failed → return failure result
         """
@@ -731,18 +733,16 @@ class Dispatcher:
                 print(f"    ⏭️  {agent_def.name} failed, retry_on_failure=compile but error not compile-related, skipping")
                 return prev_result
 
-        # ── Determine starting tier ──
-        failed = failed_tier or prev_result.tier_used
-        fallback = hint.fallback or "quality"
-
-        # Retry at a higher tier — try fallback first, then quality as last resort
-        tiers_to_try = []
-        if fallback != failed:
-            tiers_to_try.append(fallback)
-        # If the current tier is the highest we'd normally try, push one more step
+        failed = failed_tier or prev_result.tier_used or hint.tier or "quality"
+        if failed not in self.llm.TIERS:
+            failed = "quality"
         current_failed = failed
-        for attempt_tier in tiers_to_try + (["quality"] if fallback == failed and fallback != "quality" else []):
-            print(f"    ⚠️ {agent_def.name} failed at {current_failed}, escalating to {attempt_tier} for retry")
+        tried = [failed]
+        start = self.llm.TIERS.index(failed) + 1
+        for attempt_tier in self.llm.TIERS[start:]:
+            if attempt_tier not in self.llm.tier_models:
+                continue
+            print(f"    ⚠️ {agent_def.name} failed at {current_failed}, falling back to {attempt_tier}")
             retry_context = context + (
                 f"\n\nNote: Previously failed at {current_failed} tier, error: {prev_result.error}"
             )
@@ -754,25 +754,25 @@ class Dispatcher:
                 )
             else:
                 result = self.run_agent(agent_def, goal, retry_context, tier=attempt_tier)
+            tried.append(attempt_tier)
             if result.success:
                 return result
             current_failed = attempt_tier
 
-        # If reentrant and all escalation also failed → flag for decomposition
+        chain = "→".join(tried)
         if hint.reentrant:
-            print(f"    ⚠️ {agent_def.name} failed at both tiers, marked for decomposition (reentrant)")
+            print(f"    ⚠️ {agent_def.name} failed at {chain}, marked for decomposition (reentrant)")
             return DispatcherResult(
                 success=False,
                 output=prev_result.output,
-                error=f"Failed at {failed} and {fallback}; marked for decomposition",
+                error=f"Failed at {chain}; marked for decomposition",
             )
 
-        # Give up
         print(f"    ❌ {agent_def.name} all attempts failed, skipping")
         return DispatcherResult(
             success=False,
             output="",
-            error=f"All attempts failed (tiers: {failed}→{fallback})",
+            error=f"All attempts failed (tiers: {chain})",
         )
 
     # ── Internal: Prompt Building ──
