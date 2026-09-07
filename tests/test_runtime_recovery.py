@@ -36,6 +36,16 @@ def test_running_record_reconciles_without_replay(project, tmp_path):
     assert model.calls == 0
 
 
+def test_context_is_bounded_and_keeps_failure_diagnostics(project, tmp_path):
+    rt = Runtime(tmp_path / 'state')
+    task = rt.create(contract(project))
+    result = rt.run(task, Scripted([('submit', {})]))
+    result['attempts'].append({'workspace': result['workspace'], 'status': 'running'})
+    context = json.loads(rt.context(result)[1]['content'])
+    assert 'AssertionError' in context['prior_attempts'][0]['evidence']['output']
+    assert len(json.dumps(context)) < 100000
+
+
 def test_real_process_crash_reconciles_without_replay(project, tmp_path):
     import sys
     import time

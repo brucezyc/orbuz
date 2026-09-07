@@ -45,8 +45,8 @@ def validate(spec):
                'max_calls', 'max_output_tokens', 'timeout', 'max_seconds'}
     if set(spec) - allowed:
         raise ValueError('Unknown contract fields')
-    if not isinstance(spec.get('goal'), str) or not spec['goal'].strip():
-        raise ValueError('A goal is required')
+    if not isinstance(spec.get('goal'), str) or not spec['goal'].strip() or len(spec['goal']) > 16000:
+        raise ValueError('A nonempty goal of at most 16000 characters is required')
     repo = Path(spec['repository']).resolve()
     if Path(git(repo, 'rev-parse', '--show-toplevel')).resolve() != repo:
         raise ValueError('Repository must be its Git root')
