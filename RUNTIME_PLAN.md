@@ -21,6 +21,15 @@ Goals/context/attempts/evidence replace role/stage-driven execution. Model propo
 
 First red/green test of false-success rejection; real temporary Git repositories and subprocess checks. Regression: failing check, candidate modification invalidates evidence, protected file/path escape denied, timeout/cancel, no-key/API failure, tool budget exhaustion, persisted restart. Real model trial only inside a disposable fixture, limited calls/output/time; no production code changes and no fabricated model responses. Test doubles are clearly identified as deterministic runtime tests.
 
+## First-slice hardening
+
+The trial oracle uses child candidate processes and independent parent assertions;
+this fixes demonstrated early-exit false positives, not every adversarial oracle.
+Built-in HTTP requests receive remaining deadline/cancellation; serialized messages
+plus tools have a 100KB UTF-8 boundary. Custom synchronous adapters retain documented
+limits. Patch replay/freshness regression evidence and current Concept progress are
+recorded in RUNTIME_VERIFICATION.md; do not infer them from old live-trial acceptance.
+
 ## Later stages (not included in first slice)
 
 Dynamic Concept Decomposer (investigate/split/merge/replan with versioned contracts); dependency invalidation and integration across multiple tasks; parallel exploration; calibrated cost routing and same-model/same-budget multi-agent baseline evaluation; production resource quotas/cgroups and non-Linux runners. Do not report these complete based on a single-task trial.
