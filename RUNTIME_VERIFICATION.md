@@ -52,6 +52,39 @@ interrupted state reconciliation, cancellation, source/log/contract modification
 deleted workspace, read-only sandbox, isolated network/host paths, output limit,
 timeout and process cleanup.
 
+## 2026-09-07 oracle correction (offline)
+
+The old trial oracle imported the candidate in its own assertion interpreter.
+Three actual sandbox regressions reproduced false exit-zero success: `os._exit(0)`,
+`sys.exit(0)` and printing a fake acceptance marker before early exit. The trial now
+uses child candidate processes with independent parent assertions, strict result
+schema/types, expected values and protocol-failure handling. Missing JSON must not
+be confused with an expected candidate ValueError on malformed input.
+
+Eight targeted regressions pass. Both previously saved **real-model candidates**
+were copied unchanged into disposable directories and rerun against the strengthened
+oracle; both passed. This is offline re-verification of existing model output, not
+another paid model trial and not retroactive modification of original evidence.
+`/root/yzhu/exports/orbuz_saved_candidates_recheck_20260907.json` records revisions,
+real sandbox exits and log paths. Generic arbitrary acceptance commands still rely
+on the author's oracle quality; hardcoding/forged child responses are not eliminated.
+
+## Request budget correction (offline)
+
+The pre-fix probe recorded a 0.05-second task consuming roughly 0.35 seconds in a
+slow synchronous adapter and an initial serialized brief of 150,749 characters.
+The built-in HTTP adapter now exposes bounded requests; runtime forwards remaining
+deadline/cancellation and records exhausted/cancelled states without executing late
+actions. Async MockTransport probes and a real local hanging TCP server confirm
+client coroutine/socket cancellation. Custom synchronous adapters remain a documented
+compatibility limitation; remote generation/billing cannot be guaranteed cancelled.
+
+Before each request, message and tool JSON is capped at 100,000 UTF-8 bytes. History
+can renew into a protocol-valid brief; an oversized immutable brief fails before a
+request is reserved. Tests cover initial oversize, non-ASCII text, renewed history,
+status propagation and actual local socket closure. No paid calls were made.
+Evidence: `/root/yzhu/exports/orbuz_request_budget_green_20260907.log`.
+
 ## Not delivered
 
 No deployment, multi-task graph, dynamic Concept integration, parallel candidates,

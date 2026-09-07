@@ -85,9 +85,14 @@ Example contract (repository must already exist and be committed):
 `max_calls` counts requests, including failed/reserved interrupted requests;
 `max_output_tokens` bounds each requested model completion. API token usage is
 recorded as reported; monetary pricing is **not guessed** and no dollar-cap guarantee
-is claimed. Calls have finite HTTP timeouts; cancellation is checked between model
-responses and promptly during command execution. A currently blocked HTTP request
-may delay cancellation until it returns/times out.
+is claimed. The built-in ChatModel uses a cancellable async HTTP coroutine with the
+remaining task deadline; cancellation aborts local transport, not just returned actions.
+This cannot guarantee the remote provider stops generation or billing. Trusted custom
+adapters exposing only `complete` retain synchronous compatibility and may delay
+cancellation; implement `complete_bounded` for runtime deadline/cancel propagation.
+Serialized messages plus tool schemas are capped at 100,000 UTF-8 bytes before every
+model request (not a token/dollar cap). Oversized history renews a protocol-valid brief;
+if the contract/brief alone exceeds the cap, the task fails before reserving a request.
 
 ## Evidence semantics and limits
 
