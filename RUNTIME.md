@@ -32,7 +32,8 @@ No host home, credentials, inherited API-key environment or network are exposed.
 allowlist, which rejects `..`, absolute paths and symlinks. Checks cannot rewrite
 source or tests. Processes are killed on timeout/cancel/output overflow, with PID
 namespaces handling detached descendants. Output is capped at 4 MiB per command;
-the model sees the last 6000 characters and a log reference.
+the model sees the last 6000 characters and a log reference. `read_log` retrieves
+paged full logs from this task (including older attempts), never arbitrary host logs.
 
 This is **not a complete hostile-code platform**: CPU/memory/process quotas via
 cgroups, dependency installation, and non-Linux executors are not implemented.

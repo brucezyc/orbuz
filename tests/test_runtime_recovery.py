@@ -81,6 +81,26 @@ Runtime(sys.argv[1]).run(sys.argv[2], Waiting())
             proc.wait(timeout=5)
 
 
+def test_full_logs_are_retrievable_but_other_tasks_are_not(project, tmp_path):
+    from orbuz.runtime.tools import dispatch
+    taskroot = tmp_path / 'task'
+    current = taskroot / 'current'
+    old = taskroot / 'previous'
+    current.mkdir(parents=True)
+    old.mkdir()
+    logfile = old / 'acceptance.log'
+    logfile.write_text('BEGIN' + 'x' * 10000 + 'END')
+    result = dispatch('read_log', {'path': str(logfile), 'offset': 0, 'limit': 5},
+                      project, contract(project), current / 'tool.log', lambda: False, 10)
+    assert result['content'] == 'BEGIN'
+    with pytest.raises(ValueError, match='outside this task'):
+        dispatch('read_log', {'path': '/root/.hermes/.env'}, project,
+                 contract(project), current / 'tool.log', lambda: False, 10)
+    with pytest.raises(ValueError, match='outside this task'):
+        dispatch('read_log', {'path': str(tmp_path / 'other' / 'acceptance.log')}, project,
+                 contract(project), current / 'tool.log', lambda: False, 10)
+
+
 def test_read_symlink_escape_denied(project, tmp_path):
     (project / 'escape').symlink_to('/root/.hermes/.env')
     git(project, 'add', 'escape')

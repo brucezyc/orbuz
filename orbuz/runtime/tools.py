@@ -15,6 +15,8 @@ TOOLS = [
     schema('list_files', 'List tracked source paths; .git is private.', {}, []),
     schema('read_file', 'Read source with offset/limit in characters; use offsets for large files.',
            {'path': TEXT, 'offset': {'type': 'integer'}, 'limit': {'type': 'integer'}}, ['path']),
+    schema('read_log', 'Read a runtime log referenced by this task, including previous attempts. Character offset/limit for full-log retrieval.',
+           {'path': TEXT, 'offset': {'type': 'integer'}, 'limit': {'type': 'integer'}}, ['path']),
     schema('write_file', 'Replace one explicitly writable source file; protected paths are denied.',
            {'path': TEXT, 'content': TEXT}, ['path', 'content']),
     schema('command', 'Execute argv in a networkless sandbox. Source is read-only; /tmp is scratch. Use /usr/bin/python3. No host paths or credentials.',
@@ -31,14 +33,22 @@ def dispatch(name, args, workspace, spec, log, cancel, remaining):
     root = Path(workspace)
     if name == 'list_files':
         return {'files': git(root, 'ls-files').splitlines()[:2000]}
-    if name == 'read_file':
-        p = source_path(root, args['path'])
+    if name in ('read_file', 'read_log'):
+        if name == 'read_log':
+            p = Path(args['path'])
+            task_root = log.parent.parent
+            if (not p.is_absolute() or p.is_symlink() or p.suffix != '.log'
+                    or not p.resolve().is_relative_to(task_root.resolve())
+                    or p.resolve().parent.parent != task_root.resolve()):
+                raise ValueError('Log is outside this task')
+        else:
+            p = source_path(root, args['path'])
         offset, limit = args.get('offset', 0), args.get('limit', 6000)
         if type(offset) is not int or offset < 0 or type(limit) is not int or not 1 <= limit <= 12000:
             raise ValueError('Invalid read range')
-        if p.stat().st_size > 2_000_000:
+        if p.stat().st_size > (4 * 1024 * 1024 if name == 'read_log' else 2_000_000):
             raise ValueError('File too large for source tool')
-        text = p.read_text()
+        text = p.read_text(errors='replace')
         return {'content': text[offset:offset + limit], 'total_chars': len(text),
                 'path': args['path'], 'offset': offset}
     if name == 'write_file':

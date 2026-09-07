@@ -25,6 +25,15 @@ These results establish a small real model/tool/verification loop. They do not
 establish multi-task orchestration, broad coding competence, or cost/quality gains
 over a single agent. This slice *is itself* a single-task agent baseline.
 
+## Post-hardening live rerun
+
+A second fresh real-API trial on runtime commit `5e002b5` also accepted:
+- Task `c41630f4c9304f18b60339be793196cf`, DeepSeek v4 flash recorded in attempt metadata.
+- 8 model requests, 15.0412 s; reported prompt/completion/total tokens: 25,971 / 2,077 / 28,048.
+- Candidate `d2d6c67d45585a0a380fee914452da7d54c2a2f0`.
+- `/root/yzhu/exports/orbuz-runtime-final-trial-20260907/result.json` and transcript/logs.
+- Fresh evidence verification accepted; separate sandbox acceptance rerun exited 0.
+
 ## Regression commands
 
 ```bash
@@ -33,8 +42,9 @@ over a single agent. This slice *is itself* a single-task agent baseline.
 ```
 
 Initial missing-module red test was observed before implementation; the first six
-runtime tests subsequently passed. The final regression count is recorded in the
-local commit/closeout report, including additional independent-review regressions.
+runtime tests subsequently passed. Latest full regression: **50 passed**. This includes
+transport mocks (explicitly marked), actual SIGKILL recovery, acceptance aliases,
+ignored-file evidence invalidation and scoped full-log retrieval.
 
 Covered failure classes include false textual PASS, failed check, write scope and
 symlink escapes, API error/missing credential, budget exhaustion, explicit retries,
