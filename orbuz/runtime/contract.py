@@ -75,9 +75,18 @@ def validate(spec):
             if not candidate.is_relative_to('/workspace'):
                 continue
             candidate = candidate.relative_to('/workspace')
-        name = relative(candidate.as_posix())
-        if name in spec['writable']:
+        normalized = candidate.as_posix()
+        # Match declared paths even before creation; inspect existing entry aliases.
+        if normalized in spec['writable']:
             raise ValueError('Acceptance entry point cannot be writable')
+        try:
+            exists = (repo / candidate).is_file()
+        except OSError:
+            exists = False  # Inline code may exceed the filesystem path length.
+        if exists:
+            resolved = (repo / candidate).resolve()
+            if resolved.is_relative_to(repo) and resolved.relative_to(repo).as_posix() in spec['writable']:
+                raise ValueError('Acceptance entry point cannot be writable')
     for key, default, maximum in [('max_calls', 12, 100), ('max_output_tokens', 2048, 16384)]:
         n = spec.setdefault(key, default)
         if type(n) is not int or not 1 <= n <= maximum:
