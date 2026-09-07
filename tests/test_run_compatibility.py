@@ -101,6 +101,20 @@ def test_failed_call_falls_to_next_configured_tier():
     client.close()
 
 
+def test_unknown_provider_prefix_keeps_full_api_id():
+    client = LLMClient(
+        models={"cheap": "Qwen/Qwen3.8-27B"},
+        tier_config={"cheap": {"api_key": "k-c", "api_base": "https://example.invalid/v1"}},
+    )
+    bound = client._bound_ids["cheap"]
+    resolved = client.catalog.resolve(bound)
+    assert bound == "tier-cheap/Qwen/Qwen3.8-27B"
+    assert resolved is not None
+    assert resolved.api_id == "Qwen/Qwen3.8-27B"
+    assert resolved.api_key == "k-c"
+    client.close()
+
+
 def test_architect_config_preserves_cli_override():
     args = Namespace(architect_model="cli/model")
     _apply_config(args, {"architect": {"model": "config/model", "api_key": "test-key",

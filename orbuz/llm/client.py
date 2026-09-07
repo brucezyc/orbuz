@@ -31,7 +31,7 @@ from typing import Callable
 import httpx
 
 from orbuz.llm.catalog import Catalog, ResolvedModel, DEFAULT_MODELS, build_catalog
-from orbuz.llm.provider import EndpointType
+from orbuz.llm.provider import EndpointType, KNOWN_PROVIDERS
 
 # Higher first. Missing or failed tiers walk this list downward.
 TIER_ORDER = ("architect", "quality", "balanced", "cheap")
@@ -191,7 +191,7 @@ class LLMClient:
                     global_key: str, global_base: str) -> str:
         """Register a possibly unknown model so its own credentials are used."""
         pid, name = Catalog.parse_model_id(model_id)
-        if not pid:
+        if not pid or pid not in KNOWN_PROVIDERS:
             pid = f"tier-{tier}"
             name = model_id
             bound_id = f"{pid}/{name}"
