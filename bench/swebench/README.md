@@ -37,6 +37,11 @@ python3 bench/swebench/run_task.py /root/bench/tasks/sympy__sympy-17630/contract
     --key-file /root/.orbuz/forge.yaml --key-path cheap.api_key --runs 6
 ```
 
+Credentials: pass `--env-file <file>` (a `KEY=VALUE` file, read in-process) or `--key-file` +
+`--key-path`. A gateway that answers `error code: 1010` is Cloudflare refusing a
+non-browser client; do not "fix" that by spoofing a User-Agent on someone's production
+gateway - use the provider endpoint directly instead.
+
 The contract keeps the localisation answer out of the candidate's hands:
 
 | field | source | why |

@@ -19,7 +19,21 @@ TERMINAL = ('accepted', 'rejected', 'hacking_suspected', 'failed', 'stalled', 'e
             'blocked', 'cancelled')
 
 
+def read_env_file(path, name):
+    """Read KEY=VALUE lines without letting the value through argv or a shell."""
+    for line in Path(path).read_text().splitlines():
+        line = line.strip()
+        if not line or line.startswith('#') or '=' not in line:
+            continue
+        key, _, value = line.partition('=')
+        if key.strip() == name:
+            return value.strip().strip('"').strip("'")
+    raise SystemExit(f'{name} not found in {path}')
+
+
 def credential(args):
+    if args.env_file:
+        return read_env_file(args.env_file, args.key_env)
     if args.key_file:
         import yaml
         value = yaml.safe_load(Path(args.key_file).read_text())
@@ -44,6 +58,7 @@ def main():
     parser.add_argument('--key-env', default='DEEPSEEK_API_KEY')
     parser.add_argument('--key-file')
     parser.add_argument('--key-path', default='cheap.api_key')
+    parser.add_argument('--env-file', help='KEY=VALUE file to read --key-env from')
     parser.add_argument('--runs', type=int, default=6)
     parser.add_argument('--orbuz', default='/root/orbuz')
     args = parser.parse_args()
