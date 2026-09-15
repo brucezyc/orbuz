@@ -268,6 +268,48 @@ def test_unresolved_step_blocks_resume_until_retry(project, tmp_path):
     assert fresh['attempts'][-1].get('resumed') is None
 
 
+# ---------- transient transport failures ----------
+
+class Flaky(Scripted):
+    """Refuses the first `failures` requests with `message`, then behaves normally."""
+
+    def __init__(self, actions, failures, message='Model HTTP status 503'):
+        super().__init__(actions)
+        self.failures, self.message, self.requests = failures, message, 0
+
+    def complete(self, messages, tools, max_tokens):
+        self.requests += 1
+        if self.failures > 0:
+            self.failures -= 1
+            raise RuntimeError(self.message)
+        return super().complete(messages, tools, max_tokens)
+
+
+def test_transient_model_failure_is_retried_inside_the_same_attempt(project, tmp_path, monkeypatch):
+    """A 503 must not throw away a long run: the request has no side effect, so retry in place."""
+    monkeypatch.setattr(engine_mod, 'RETRY_BACKOFF', 0.01)
+    rt = Runtime(tmp_path / 'state')
+    task = rt.create(contract(project))
+    model = Flaky([('write_file', {'path': 'answer.py', 'content': GOOD}), ('submit', {})],
+                  failures=2)
+    result = rt.run(task, model)
+    assert result['status'] == 'accepted'
+    retries = result['attempts'][-1]['model_retries']
+    assert len(retries) == 2 and result['attempts'][-1].get('resumed') is None
+    assert model.requests == 4        # two refusals plus two real requests, one attempt
+    assert result['calls'] == 2       # a refused request does not buy another call
+
+
+def test_permanent_model_failure_is_not_retried(project, tmp_path, monkeypatch):
+    monkeypatch.setattr(engine_mod, 'RETRY_BACKOFF', 0.01)
+    rt = Runtime(tmp_path / 'state')
+    task = rt.create(contract(project))
+    model = Flaky([('submit', {})], failures=99, message='Model HTTP status 401')
+    result = rt.run(task, model)
+    assert result['status'] == 'failed' and '401' in result['error']
+    assert model.requests == 1 and result['attempts'][-1]['model_retries'] == []
+
+
 # ---------- stall ----------
 
 def test_repeated_identical_tool_calls_end_as_stalled(project, tmp_path):

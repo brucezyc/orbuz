@@ -26,6 +26,7 @@ rather than re-executed. A step whose external effect cannot be confirmed is rec
 import fcntl
 import hashlib
 import json
+import re
 import time
 import uuid
 from contextlib import contextmanager
@@ -44,6 +45,25 @@ from orbuz.runtime.store import Store
 from orbuz.runtime.tools import TOOLS, dispatch
 
 CONTEXT_CHARS = 100_000
+# A model request has no external side effect, so a transient transport failure is worth
+# another try inside the same attempt: multi-hour runs do meet 429/5xx, and letting one of
+# them end the task throws away every step already paid for.
+MODEL_RETRIES = 3
+RETRY_BACKOFF = 1.0
+RETRYABLE_STATUS = (408, 409, 425, 429, 500, 502, 503, 504)
+TRANSIENT_EXCEPTIONS = ('ConnectError', 'ConnectTimeout', 'ReadError', 'ReadTimeout',
+                        'RemoteProtocolError', 'TransportError', 'ProtocolError',
+                        'IncompleteRead', 'ServerDisconnectedError')
+
+
+def transient_failure(exc):
+    """Retry only transport/availability failures; a bad request or bad key repeats forever."""
+    match = re.search(r'HTTP status (\d{3})', str(exc))
+    if match:
+        return int(match.group(1)) in RETRYABLE_STATUS
+    return (isinstance(exc, (ConnectionError, TimeoutError, OSError))
+            or type(exc).__name__ in TRANSIENT_EXCEPTIONS
+            or 'timed out' in str(exc).lower() or 'connection' in str(exc).lower())
 RESUMABLE = ('interrupted', 'capped', 'stalled')
 FINISHED = ('accepted', 'rejected', 'hacking_suspected', 'blocked', 'failed', 'cancelled',
             'exhausted', 'stale')
@@ -175,7 +195,8 @@ class Runtime:
             detector = StallDetector(max_stalls=task.get('stall', {}).get('max_stalls', 3),
                                      interval=spec.get('limits', {}).get('ledger_interval', 5))
             fingerprint = task.get('stall', {}).get('fingerprint')
-            repeats = task.get('stall', {}).get('repeats', 0)
+            repeats = (task.get('stall') or {}).get('repeats', 0)
+            model_retries = []
             self.store.save(task)
             try:
                 while True:
@@ -212,7 +233,7 @@ class Runtime:
                     task['steps'] += 1
                     self.store.save(task)
                     response = self._call_model(model, pinning.sanitize_for_model(messages), spec,
-                                                remaining, cancel)
+                                                remaining, cancel, model_retries)
                     if response is None:
                         task['status'] = 'cancelled' if cancel() else 'exhausted'
                         self.journal.cap(task_id, step_name, task['status'])
@@ -282,6 +303,7 @@ class Runtime:
                 attempt['status'] = task['status']
                 attempt['error'] = task.get('error')
                 attempt['evidence'] = task.get('evidence')
+                attempt['model_retries'] = model_retries
                 attempt['finished_at'] = time.time()
                 self.store.save(task)
             return self.store.load(task_id)
@@ -320,17 +342,33 @@ class Runtime:
         task['attempts'].append(attempt)
         return attempt_dir, workspace, attempt, self.context(task)
 
-    def _call_model(self, model, messages, spec, remaining, cancel):
-        """One bounded request. None means cancelled or out of time (caller decides the state)."""
-        if hasattr(model, 'complete_bounded'):
+    def _call_model(self, model, messages, spec, remaining, cancel, retries=None):
+        """One bounded request, retried in place on transient failures.
+
+        None means cancelled or out of time (caller decides the state). A permanent failure
+        (bad request, credentials, truncated output) propagates immediately: repeating it
+        would burn the budget without changing the answer.
+        """
+        attempt = 0
+        while True:
             try:
-                return model.complete_bounded(messages, TOOLS, spec['max_output_tokens'],
-                                              remaining=remaining(), cancel=cancel)
-            except InterruptedError:
+                if hasattr(model, 'complete_bounded'):
+                    return model.complete_bounded(messages, TOOLS, spec['max_output_tokens'],
+                                                  remaining=remaining(), cancel=cancel)
+                return model.complete(messages, TOOLS, spec['max_output_tokens'])
+            except (InterruptedError, TimeoutError):
                 return None
-            except TimeoutError:
-                return None
-        return model.complete(messages, TOOLS, spec['max_output_tokens'])
+            except Exception as exc:
+                if attempt >= MODEL_RETRIES or cancel() or not transient_failure(exc):
+                    raise
+                delay = min(RETRY_BACKOFF * (2 ** attempt), max(0.0, remaining()))
+                attempt += 1
+                if retries is not None:
+                    retries.append({'attempt': attempt, 'after_s': round(delay, 2),
+                                    'error': f'{type(exc).__name__}: {exc}'[:200]})
+                if delay <= 0:
+                    raise
+                time.sleep(delay)
 
     def _run_tool(self, task, call, index, attempt_dir, workspace, spec, cancel, remaining):
         task_id = task['id']

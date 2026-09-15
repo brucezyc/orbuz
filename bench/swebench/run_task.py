@@ -60,6 +60,7 @@ def main():
     parser.add_argument('--key-path', default='cheap.api_key')
     parser.add_argument('--env-file', help='KEY=VALUE file to read --key-env from')
     parser.add_argument('--runs', type=int, default=6)
+    parser.add_argument('--task', help='resume this task instead of creating a new one')
     parser.add_argument('--orbuz', default='/root/orbuz')
     args = parser.parse_args()
 
@@ -70,7 +71,7 @@ def main():
 
     rt = Runtime(Path(args.state_dir))
     spec = json.loads(Path(args.contract).read_text())
-    task_id = rt.create(spec)
+    task_id = args.task or rt.create(spec)
     print(json.dumps({'task': task_id, 'goal_chars': len(spec['goal']),
                       'writable': len(spec['writable']),
                       'visible_nodes': len(spec['acceptance']) - 6,
