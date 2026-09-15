@@ -20,8 +20,11 @@ def main():
         run.add_argument('--model', required=True)
         run.add_argument('--base-url', required=True)
         run.add_argument('--key-env', default='DEEPSEEK_API_KEY')
-    for action in ('status', 'verify', 'cancel'):
+    for action in ('status', 'verify', 'cancel', 'steps'):
         sub.add_parser(action).add_argument('task_id')
+    pin = sub.add_parser('pin')
+    pin.add_argument('task_id')
+    pin.add_argument('text')
     args = parser.parse_args()
     model = None
     try:
@@ -36,8 +39,14 @@ def main():
             result = rt.status(args.task_id)
         elif args.action == 'verify':
             result = rt.verify(args.task_id)
+        elif args.action == 'steps':
+            result = {'id': args.task_id, 'steps': rt.journal.steps(args.task_id),
+                      'resume_plan': rt.journal.resume_plan(args.task_id)}
+        elif args.action == 'pin':
+            result = {'id': args.task_id, 'pin': rt.pin(args.task_id, args.text)}
         else:
             result = rt.status(args.task_id)
+            result['journal'] = rt.journal.steps(args.task_id)
         print(json.dumps(result, indent=2, ensure_ascii=False))
         if args.action in ('run', 'retry', 'verify') and result['status'] != 'accepted':
             return 1

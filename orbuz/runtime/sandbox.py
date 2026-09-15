@@ -17,7 +17,8 @@ OUTPUT_CHARS = 6000
 _ENV = {"PATH": "/usr/bin:/bin", "LANG": "C.UTF-8", "HOME": "/tmp", "TMPDIR": "/tmp"}
 
 
-def _command(workspace: Path, argv: list[str], empty_fd: int) -> list[str]:
+def _command(workspace: Path, argv: list[str], empty_fd: int,
+             read_only_mounts: tuple = ()) -> list[str]:
     # 不搜索调用者 PATH，避免把恶意 bwrap 当作隔离器执行。
     command = [
         "/usr/bin/bwrap",
@@ -43,6 +44,10 @@ def _command(workspace: Path, argv: list[str], empty_fd: int) -> list[str]:
         "--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp",
         "--ro-bind", str(workspace), "/workspace",
     ])
+    # Held-out acceptance assets: read-only, outside /workspace, single-level guest path so
+    # the mount point always exists without relying on bwrap creating parents.
+    for host, guest in read_only_mounts:
+        command.extend(["--ro-bind", host, guest])
     # .git 既可能是目录，也可能是指向宿主 worktree gitdir 的文本文件。
     # 不跟随 .git 符号链接：挂载目标会解析链接，直接拒绝比误遮蔽更安全。
     for root, directories, files in os.walk(workspace, followlinks=False):
@@ -75,12 +80,15 @@ def execute(
     log_path: Path,
     timeout: float = 30,
     cancel: Callable[[], bool] | None = None,
+    read_only_mounts: list[tuple[str, str]] | None = None,
 ) -> dict:
     """合并 stdout/stderr 保存至宿主日志；超时/取消/日志超限均杀组并 wait。
 
     exit_code=None 表示启动前失败或取消；隔离器失败保留非零退出码。
     日志超限保留前 4MiB 并终止，output 始终是已保存日志的末 6000 字。
     workspace 必须是父 runtime 准备的源码目录，而非宿主根目录。
+    read_only_mounts 为 (宿主路径, 沙箱绝对路径) 列表，用于只读挂载验收资产；
+    目标不能落在 /workspace 内，宿主路径必须存在。
     """
     workspace = Path(workspace).resolve(strict=True)
     log_path = Path(log_path).absolute()
@@ -92,6 +100,16 @@ def execute(
         raise ValueError("argv must be a nonempty list of strings without NUL")
     if not math.isfinite(timeout) or timeout < 0:
         raise ValueError("timeout must be finite and nonnegative")
+    mounts = []
+    for entry in read_only_mounts or ():
+        if not isinstance(entry, (tuple, list)) or len(entry) != 2:
+            raise ValueError("read_only_mounts entries must be (host, guest) pairs")
+        host, guest = entry
+        if not isinstance(host, str) or not isinstance(guest, str) or "\0" in host or "\0" in guest:
+            raise ValueError("Invalid read-only mount")
+        if not guest.startswith("/") or guest == "/" or guest.startswith("/workspace"):
+            raise ValueError("read-only mount guest path must be absolute and outside /workspace")
+        mounts.append((str(Path(host).resolve(strict=True)), guest))
 
     result = {"exit_code": None, "timed_out": False, "cancelled": False,
               "output": "", "log_path": str(log_path)}
@@ -120,7 +138,7 @@ def execute(
         else:
             try:
                 with open(os.devnull, "rb") as empty:
-                    command = _command(workspace, argv, empty.fileno())
+                    command = _command(workspace, argv, empty.fileno(), tuple(mounts))
                     started = time.monotonic()
                     process = subprocess.Popen(
                         command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,

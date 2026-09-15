@@ -57,7 +57,8 @@ def source_path(root, name):
 def validate(spec):
     spec = dict(spec)
     allowed = {'goal', 'repository', 'writable', 'context', 'acceptance',
-               'max_calls', 'max_output_tokens', 'timeout', 'max_seconds'}
+               'max_calls', 'max_output_tokens', 'timeout', 'max_seconds',
+               'heldout', 'heldout_assets', 'limits', 'prices'}
     if set(spec) - allowed:
         raise ValueError('Unknown contract fields')
     if not isinstance(spec.get('goal'), str) or not spec['goal'].strip() or len(spec['goal']) > 16000:
@@ -110,7 +111,70 @@ def validate(spec):
         n = spec.setdefault(key, default)
         if type(n) not in (int, float) or not math.isfinite(n) or not 0 < n <= maximum:
             raise ValueError('Invalid ' + key)
+    _validate_heldout(spec, repo)
+    _validate_limits(spec)
     return spec
+
+
+def _argv(key, value):
+    if not isinstance(value, list) or not value or any(
+            not isinstance(a, str) or not a or '\x00' in a for a in value):
+        raise ValueError(f'Nonempty {key} argv required')
+    return list(value)
+
+
+def _validate_heldout(spec, repo):
+    """A declared held-out suite must live outside the candidate's reachable source."""
+    if 'heldout' in spec:
+        spec['heldout'] = _argv('heldout', spec['heldout'])
+    assets = spec.get('heldout_assets')
+    if assets is None:
+        if 'heldout' in spec:
+            raise ValueError('heldout requires heldout_assets: the hidden suite must live '
+                             'outside the candidate workspace')
+        return
+    if not isinstance(assets, list) or not assets:
+        raise ValueError('heldout_assets must be a nonempty list')
+    resolved = []
+    for path in assets:
+        candidate = Path(path)
+        if not candidate.is_absolute() or not candidate.exists():
+            raise ValueError('heldout_assets entries must be existing absolute paths')
+        candidate = candidate.resolve()
+        if candidate == repo or repo in candidate.parents:
+            raise ValueError('heldout_assets must live outside the repository')
+        resolved.append(str(candidate))
+    spec['heldout_assets'] = resolved
+
+
+def _validate_limits(spec):
+    limits = spec.get('limits')
+    if limits is None:
+        return
+    if not isinstance(limits, dict) or set(limits) - {'max_steps', 'max_tokens', 'max_usd',
+                                                      'degrade', 'keep_recent', 'pin_first',
+                                                      'ledger_interval'}:
+        raise ValueError('Invalid limits fields')
+    for key in ('max_steps', 'max_tokens'):
+        n = limits.get(key)
+        if n is not None and (type(n) is not int or n < 1):
+            raise ValueError('Invalid limits.' + key)
+    usd = limits.get('max_usd')
+    if usd is not None and (not isinstance(usd, (int, float)) or usd <= 0):
+        raise ValueError('Invalid limits.max_usd')
+    if 'degrade' in limits:
+        from .budget import DEGRADE_ORDER
+        if not isinstance(limits['degrade'], (list, tuple)) or set(limits['degrade']) - set(DEGRADE_ORDER):
+            raise ValueError('Invalid limits.degrade')
+        limits['degrade'] = tuple(limits['degrade'])
+    for key, maximum in (('keep_recent', 200), ('pin_first', 200), ('ledger_interval', 100)):
+        n = limits.get(key)
+        if n is not None and (type(n) is not int or not 0 <= n <= maximum):
+            raise ValueError('Invalid limits.' + key)
+    prices = spec.get('prices')
+    if prices is not None and (not isinstance(prices, dict) or
+                              set(prices) - {'input', 'output', 'cache_hit'}):
+        raise ValueError('Invalid prices fields')
 
 
 def environment():

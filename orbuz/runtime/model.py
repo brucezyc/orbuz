@@ -52,6 +52,14 @@ class ChatModel:
                     await asyncio.gather(pending, return_exceptions=True)
         return asyncio.run(request())
 
+    def summarize(self, prompt, max_tokens=2048):
+        """Context compaction uses the same transport and the same credential."""
+        response = self.client.post('chat/completions', json={
+            'model': self.model, 'messages': [{'role': 'user', 'content': prompt}],
+            'max_tokens': max_tokens}).json()
+        choices = response.get('choices') or [{}]
+        return (choices[0].get('message') or {}).get('content') or ''
+
     def _result(self, response):
         if response.status_code != 200:
             raise RuntimeError('Model HTTP status ' + str(response.status_code))

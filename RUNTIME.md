@@ -1,8 +1,13 @@
 # Evidence runtime (experimental)
 
 This is a new execution core alongside the preserved legacy `orbuz run` workflow.
-It does **not** route through the legacy orchestrator/executor. It implements one
-bounded task at a time, not the whole planned multi-agent architecture.
+It does **not** route through the legacy orchestrator/executor.
+
+There is one loop, and it is a long-horizon one. A task is a durable state machine whose
+state is persisted after every step, so one small task and a multi-hundred-step project run
+are the same code path: `run` executes steps until the task is accepted, refused, capped or
+stuck, and calling `run` again continues from where it stopped. There is no separate
+"long task" mode, no opt-in hooks and no second engine to keep in sync.
 
 ## What runs now
 
@@ -12,13 +17,62 @@ bounded task at a time, not the whole planned multi-agent architecture.
    command and previous attempt evidence. It can investigate more files with tools.
 4. Run a real native tool-call loop: list/read/write source, sandboxed commands,
    submit candidate or report blocked. Plain completion text never marks success.
-5. On submit, commit the candidate and run the fixed acceptance argv. Save output,
-   exit code, timeout/cancellation, revision, contract hash, environment fingerprint,
-   log hash, patch hash, base revision and byte-exact candidate patch. Accept only
-   after an actual successful check. Empty diffs produce zero-byte no-op patches.
-6. Persist status and attempt history in SQLite. Explicit retry starts a new candidate
-   from the original base, includes previous failure evidence and retains cumulative
-   call/time budgets. No command replay and no automatic merge/push/deploy.
+5. On submit, commit the candidate and run the fixed acceptance argv, plus the hidden
+   held-out suite when the contract declares one. Save output, exit code,
+   timeout/cancellation, revision, contract hash, environment fingerprint, log hash,
+   patch hash, base revision and byte-exact candidate patch. Accept only after an actual
+   successful check. Empty diffs produce zero-byte no-op patches.
+6. Persist status, attempt history **and a per-step journal** in SQLite. Explicit retry
+   starts a new candidate from the original base, includes previous failure evidence and
+   retains cumulative call/time budgets. No command replay and no automatic
+   merge/push/deploy.
+
+## One loop, durable at every step
+
+Statuses a run can end (or pause) in:
+
+- `accepted` / `rejected` / `stale` — evidence-backed outcomes, only `accepted` is success.
+- `hacking_suspected` — the visible acceptance passed but the hidden held-out suite failed.
+- `blocked` / `failed` / `cancelled` — model-reported blocker, runtime error, cancellation.
+- `exhausted` — a **hard** contract limit (`max_calls`, `max_seconds`) was reached.
+- `capped` — a **soft** limit (`limits.max_steps|max_tokens|max_usd`) was reached. This is a
+  pause, not a failure: calling `run` again continues in the same worktree.
+- `stalled` — the same tool round repeated `max_stalls` times, or the progress ledger
+  reported no change of approach.
+- `interrupted` — a previous process died; the first `run` after that only reconciles state.
+
+Journal and resume rules:
+
+- Every model request and every tool call is a journal step with a single owner. A step
+  claimed twice is refused, a completed step is never replayed.
+- A process that dies mid-tool leaves that step `running`; reconciliation turns **tool**
+  steps into `unknown` (the external effect is unverifiable) and **model** steps into
+  `failed` (no side effect, spend already charged).
+- `run` refuses to continue or restart while an `unknown`/abandoned step exists; the
+  operator must pass `retry=True` (CLI `retry`) to accept the unaccounted effect explicitly.
+- Resuming reuses the existing worktree and transcript, so work already done on disk is
+  still there and no completed tool call is repeated.
+- `limits.max_steps` is a **rate** (fresh allowance per `run` call) while tokens/dollars are
+  a **stock** (cumulative across resumes). Without that split a resumed run would cap again
+  instantly and "resume" would be a fiction.
+
+Context management is part of the loop, not an option:
+
+- Above 70% of the 100,000-byte request budget the middle of the transcript is compacted:
+  leading system block and `pin_first` opening turns stay, pinned messages survive verbatim,
+  a deterministic receipt records what is gone, the recent tail is kept, and tool-call pairs
+  are never split.
+- With a summarizer available (the built-in `ChatModel` provides one) the middle is replaced
+  by a six-section summary; an existing summary is updated in place as an anchor instead of
+  being re-summarized, and a cross-model bridge line is added when the summarizer family
+  differs from the history family.
+- `pin_*` bookkeeping lives in private message keys that are stripped before every request,
+  so no marker can reach a provider payload.
+- The prefix that must stay byte-stable for provider cache hits is fingerprinted every
+  step; changes are reported instead of silently paying full price.
+- `Runtime.pin(task_id, text)` pins work that survival-of-context must not lose. Pins are
+  re-injected after the leading block and are idempotent.
+
 
 ## Prerequisites and isolation
 
@@ -56,9 +110,16 @@ python -m orbuz.runtime --state-dir /absolute/path/outside/project/state \
 python -m orbuz.runtime --state-dir /absolute/path/outside/project/state status TASK_ID
 python -m orbuz.runtime --state-dir /absolute/path/outside/project/state verify TASK_ID
 python -m orbuz.runtime --state-dir /absolute/path/outside/project/state cancel TASK_ID
+python -m orbuz.runtime --state-dir /absolute/path/outside/project/state steps TASK_ID
+python -m orbuz.runtime --state-dir /absolute/path/outside/project/state \
+  pin TASK_ID "constraint that must survive compaction"
 python -m orbuz.runtime --state-dir /absolute/path/outside/project/state \
   retry TASK_ID --model deepseek-v4-flash --base-url https://api.deepseek.com
 ```
+
+`status` also prints the step journal (`steps` shows the journal plus the resume plan, and
+refuses to hide `unknown` steps). `run` continues a `capped`, `stalled` or `interrupted`
+task in place; `retry` starts a fresh attempt and is the only way past an unresolved step.
 
 `--key-env` selects a credential environment variable (default `DEEPSEEK_API_KEY`).
 Model and HTTPS endpoint are explicit; there is no implicit mock or alternate-provider
@@ -83,12 +144,23 @@ Example contract (repository must already exist and be committed):
   "writable": ["answer.py"],
   "context": ["answer.py", "check.py"],
   "acceptance": ["/usr/bin/python3", "-B", "check.py"],
+  "heldout": ["/usr/bin/python3", "-B", "/heldout/check_all.py"],
+  "heldout_assets": ["/absolute/path/to/hidden/dir"],
   "max_calls": 8,
   "max_output_tokens": 2048,
   "timeout": 10,
-  "max_seconds": 180
+  "max_seconds": 180,
+  "limits": {"max_steps": 30, "max_tokens": 4000000, "max_usd": 2.0,
+             "keep_recent": 10, "pin_first": 2},
+  "prices": {"input": 0.28, "output": 0.42}
 }
 ```
+
+`heldout` is a second argv run after a visible pass, with `heldout_assets` (one directory,
+outside the repository) mounted read-only at `/heldout`. A visible pass plus a held-out
+failure yields `hacking_suspected`, never `accepted`. `limits` are soft caps that end in
+`capped`; `keep_recent`/`pin_first` tune compaction. `prices` is optional and only used when
+supplied: no price is ever guessed, so a `max_usd` cap cannot fire without a price table.
 
 `max_calls` counts requests, including failed/reserved interrupted requests;
 `max_output_tokens` bounds each requested model completion. API token usage is
