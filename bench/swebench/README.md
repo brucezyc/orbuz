@@ -28,6 +28,26 @@ there. Fallback when the system interpreter has no pip: `~/venv/bin/pip install 
 /usr/local/lib/python3.11/dist-packages <pkgs>`. Install one repo at a time; when two instances
 need conflicting versions, mount a prepared virtualenv read-only instead.
 
+## Wiring an instance into an orbuz task
+
+```bash
+python3 bench/swebench/make_contract.py sympy__sympy-17630          # writes contract.json
+python3 bench/swebench/run_task.py /root/bench/tasks/sympy__sympy-17630/contract.json \
+    --state-dir /root/orbuz-state --model <model> --base-url <endpoint> \
+    --key-file /root/.orbuz/forge.yaml --key-path cheap.api_key --runs 6
+```
+
+The contract keeps the localisation answer out of the candidate's hands:
+
+| field | source | why |
+|---|---|---|
+| `goal` | `problem_statement` | the real issue text, no hints added |
+| `writable` | every non-test module in the package the tests exercise | name the package, **not** the files the gold patch touched |
+| `acceptance` | `PASS_TO_PASS` node ids | tests already present at the base commit |
+| `heldout` | `FAIL_TO_PASS` node ids | do not exist at the base commit |
+| `heldout_patch` | the PR's `test_patch` | applied to a throwaway copy of the candidate |
+| `context` | empty | the model must explore with its tools |
+
 ## Verified facts (2026-09-15, measured on 111)
 
 - Sandbox runs the real sympy suite offline: 20 passed, no network.
