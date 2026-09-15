@@ -117,7 +117,7 @@ def main():
         'heldout': [*PYTEST, *hidden],
         'heldout_patch': str(patch_file),
         'max_calls': args.max_calls,
-        'max_output_tokens': 4096,
+        'max_output_tokens': 8192,
         'timeout': 300,
         'max_seconds': args.max_seconds,
         'limits': {'max_steps': args.steps_per_run, 'keep_recent': 10, 'pin_first': 2},

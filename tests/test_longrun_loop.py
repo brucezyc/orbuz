@@ -300,6 +300,21 @@ def test_transient_model_failure_is_retried_inside_the_same_attempt(project, tmp
     assert result['calls'] == 2       # a refused request does not buy another call
 
 
+def test_truncated_output_is_retried_with_a_smaller_step_nudge(project, tmp_path, monkeypatch):
+    """A cut-off response ran nothing, so it must not discard the whole task."""
+    monkeypatch.setattr(engine_mod, 'RETRY_BACKOFF', 0.01)
+    rt = Runtime(tmp_path / 'state')
+    task = rt.create(contract(project))
+    model = Flaky([('write_file', {'path': 'answer.py', 'content': GOOD}), ('submit', {})],
+                  failures=1,
+                  message='Model output truncated; no partial actions executed')
+    result = rt.run(task, model)
+    assert result['status'] == 'accepted'
+    assert result['truncation_retries'] == 1
+    assert any(engine_mod.TRUNCATION_NUDGE in json.dumps(m) for m in model.seen[-1])
+    assert [s['status'] for s in rt.journal.steps(task)][0] == 'failed'   # the cut-off request
+
+
 def test_permanent_model_failure_is_not_retried(project, tmp_path, monkeypatch):
     monkeypatch.setattr(engine_mod, 'RETRY_BACKOFF', 0.01)
     rt = Runtime(tmp_path / 'state')

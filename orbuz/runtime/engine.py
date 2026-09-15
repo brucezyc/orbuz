@@ -50,6 +50,11 @@ CONTEXT_CHARS = 100_000
 # them end the task throws away every step already paid for.
 MODEL_RETRIES = 3
 RETRY_BACKOFF = 1.0
+# A response cut off by the output limit executed no actions, so asking again is safe. The
+# model usually tried to emit one huge tool call; telling it to split the work is the fix.
+TRUNCATION_RETRIES = 2
+TRUNCATION_NUDGE = ('Your previous response was cut off by the output limit, so none of it ran. '
+                    'Emit smaller steps: fewer or shorter lines per tool call.')
 RETRYABLE_STATUS = (408, 409, 425, 429, 500, 502, 503, 504)
 TRANSIENT_EXCEPTIONS = ('ConnectError', 'ConnectTimeout', 'ReadError', 'ReadTimeout',
                         'RemoteProtocolError', 'TransportError', 'ProtocolError',
@@ -233,8 +238,20 @@ class Runtime:
                     task['calls'] += 1
                     task['steps'] += 1
                     self.store.save(task)
-                    response = self._call_model(model, pinning.sanitize_for_model(messages), spec,
-                                                remaining, cancel, model_retries)
+                    try:
+                        response = self._call_model(model, pinning.sanitize_for_model(messages),
+                                                    spec, remaining, cancel, model_retries)
+                    except Exception as exc:
+                        # Truncated output runs nothing, so one more ask is safe and cheap
+                        # compared with discarding every step already paid for.
+                        if ('truncated' not in str(exc)
+                                or task.get('truncation_retries', 0) >= TRUNCATION_RETRIES):
+                            raise
+                        self.journal.fail(task_id, step_name, str(exc)[:200])
+                        task['truncation_retries'] = task.get('truncation_retries', 0) + 1
+                        messages.append({'role': 'user', 'content': TRUNCATION_NUDGE})
+                        self.store.save(task)
+                        continue
                     if response is None:
                         task['status'] = 'cancelled' if cancel() else 'exhausted'
                         self.journal.cap(task_id, step_name, task['status'])
