@@ -201,12 +201,21 @@ if the contract/brief alone exceeds the cap, the task fails before reserving a r
 ## Verification and live trial
 
 ```bash
-python -m pytest tests/test_run_compatibility.py tests/test_evidence_runtime.py \
-  tests/test_runtime_recovery.py tests/test_runtime_sandbox.py -q
+python -m pytest tests -q      # 143 tests: legacy suites + long-horizon core + loop
 
 # Opt-in, uses real API quota, creates only a disposable fixture:
 python examples/evidence_runtime_trial.py --live --state-dir /new/absolute/trial/path
+python examples/longrun_live_trial.py --state-dir /new/absolute/trial/path
 ```
+
+`tests/test_longrun_core.py` covers journal claims/resume plans, compaction, pins, receipts,
+budgets, stall ledgers and acceptance helpers as pure mechanisms. `tests/test_longrun_loop.py`
+drives the real engine over real Git worktrees and the real bubblewrap sandbox: confirmed cap
+then resume in the same worktree with no repeated tool step, unresolved steps blocking resume
+until `retry`, a hardcoded candidate caught by the held-out suite, stall detection, pins
+surviving compaction, and a byte-stable prompt prefix. `examples/longrun_live_trial.py` is the
+end-to-end real-model check: it forces `capped` repeatedly, resumes, and requires both the
+visible and the held-out suite to pass before printing `TRIAL PASS`.
 
 Tests use scripted model responses for deterministic protocol/fault injection and
 real Git/subprocess/sandbox execution. They are not evidence of model competence.
