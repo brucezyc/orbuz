@@ -88,10 +88,14 @@ def main():
                                        'note': 'no matching test file in this tree'}
             continue
         result = sandbox_run(work, nodes, logs / f'{suite}.log', orbuz=args.orbuz)
-        tail = [line for line in (result.get('output') or '').splitlines()
+        output = result.get('output') or ''
+        tail = [line for line in output.splitlines()
                 if 'passed' in line or 'failed' in line or 'error' in line]
+        # An empty summary usually means the suite could not even start (missing dependency,
+        # import error): surface the reason instead of just a nonzero exit code.
+        lines = [line for line in output.splitlines() if line.strip()]
         report['suites'][suite] = {'nodes': len(nodes), 'exit': result.get('exit_code'),
-                                   'summary': tail[-1] if tail else '',
+                                   'summary': tail[-1] if tail else (lines[-1] if lines else ''),
                                    'unmapped': unmapped, 'log': str(logs / f'{suite}.log')}
     print(json.dumps(report, indent=2))
     if args.json:

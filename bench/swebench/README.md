@@ -21,7 +21,11 @@ python3 bench/swebench/runner.py sympy__sympy-17630 --suite heldout --patched   
 
 The bubblewrap sandbox mounts `/usr` read-only and nothing else, so a package is importable
 inside the sandbox only if it lives in `/usr/local/lib/python3.11/dist-packages` (or
-`/usr/lib/python3/dist-packages`). Install one repo's dependencies at a time; when two instances
+`/usr/lib/python3/dist-packages`). On the workcell `python3` resolves to the orbuz virtualenv,
+where a plain `pip install` lands **invisibly for the sandbox** - `setup.py` therefore installs
+and then verifies through `/usr/bin/python3`, failing loudly if the package is not importable
+there. Fallback when the system interpreter has no pip: `~/venv/bin/pip install --target
+/usr/local/lib/python3.11/dist-packages <pkgs>`. Install one repo at a time; when two instances
 need conflicting versions, mount a prepared virtualenv read-only instead.
 
 ## Verified facts (2026-09-15, measured on 111)
