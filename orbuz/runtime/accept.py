@@ -18,6 +18,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import shutil
+import subprocess
 from pathlib import Path
 
 from orbuz.runtime.sandbox import execute
@@ -85,6 +87,31 @@ def run_suite(workspace, argv, log_path, *, timeout, cancel=None, assets=None,
 
 def heldout_present(spec):
     return bool(spec.get('heldout'))
+
+
+def stage_heldout_tree(workspace, patch_path, destination, *, runner=subprocess.run):
+    """Stage the hidden tests: copy the candidate tree, apply the held-out patch there.
+
+    The candidate workspace is mounted read-only and must stay exactly as the candidate left
+    it, but hidden tests sometimes have to be written into the tree (a real PR adds test
+    cases to existing test files). Copying gives them somewhere writable without touching the
+    candidate, and the patch file itself stays outside both trees.
+    """
+    workspace, destination = Path(workspace).resolve(), Path(destination).resolve()
+    patch_file = Path(patch_path).resolve(strict=True)
+    if not workspace.is_dir():
+        raise ValueError('Candidate workspace is missing: ' + str(workspace))
+    if destination.exists():
+        shutil.rmtree(destination)
+    shutil.copytree(workspace, destination, symlinks=True,
+                    ignore=shutil.ignore_patterns('.git'))
+    applied = runner(['git', 'apply', '-p1', str(patch_file)], cwd=str(destination),
+                     capture_output=True, text=True)
+    if applied.returncode != 0:
+        raise ValueError('Held-out patch did not apply cleanly: ' +
+                         (applied.stderr or applied.stdout).strip()[:400])
+    return {'tree': str(destination), 'patch_path': str(patch_file),
+            'patch_hash': hashlib.sha256(patch_file.read_bytes()).hexdigest()}
 
 
 def verdict(visible, heldout=None):

@@ -458,8 +458,15 @@ class Runtime:
         visible = acceptance.run_suite(root, spec['acceptance'], attempt_dir / 'acceptance.log',
                                        timeout=timeout, cancel=cancel)
         heldout = None
+        staging = None
         if acceptance.heldout_present(spec):
-            heldout = acceptance.run_suite(root, spec['heldout'], attempt_dir / 'heldout.log',
+            heldout_root = root
+            if spec.get('heldout_patch'):
+                staging = acceptance.stage_heldout_tree(
+                    root, spec['heldout_patch'], Path(attempt_dir) / 'heldout-tree')
+                heldout_root = Path(staging['tree'])
+            heldout = acceptance.run_suite(heldout_root, spec['heldout'],
+                                           attempt_dir / 'heldout.log',
                                            timeout=timeout, cancel=cancel,
                                            assets=spec.get('heldout_assets'))
         status = acceptance.verdict(visible, heldout)
@@ -471,6 +478,7 @@ class Runtime:
         evidence['patch_hash'] = hashlib.sha256(patch).hexdigest()
         evidence['base_revision'] = spec['base_revision']
         evidence['suites'] = json.loads(acceptance.summarize(visible, heldout))
+        evidence['heldout_staging'] = staging
         task['evidence'] = evidence
         task['heldout'] = evidence['suites']['heldout']
         if status == 'cancelled':
@@ -514,6 +522,12 @@ class Runtime:
                 if record:
                     valid = valid and hashlib.sha256(
                         Path(record['log_path']).read_bytes()).hexdigest() == record['log_hash']
+            staged = evidence.get('heldout_staging')
+            if staged:
+                # A changed hidden suite must void the acceptance it produced.
+                hidden = Path(staged['patch_path'])
+                valid = valid and hidden.is_file() and hashlib.sha256(
+                    hidden.read_bytes()).hexdigest() == staged['patch_hash']
             if valid:
                 git(workspace, 'merge-base', '--is-ancestor', base, evidence['revision'])
         except Exception:

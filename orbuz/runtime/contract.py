@@ -58,7 +58,7 @@ def validate(spec):
     spec = dict(spec)
     allowed = {'goal', 'repository', 'writable', 'context', 'acceptance',
                'max_calls', 'max_output_tokens', 'timeout', 'max_seconds',
-               'heldout', 'heldout_assets', 'limits', 'prices'}
+               'heldout', 'heldout_assets', 'heldout_patch', 'limits', 'prices'}
     if set(spec) - allowed:
         raise ValueError('Unknown contract fields')
     if not isinstance(spec.get('goal'), str) or not spec['goal'].strip() or len(spec['goal']) > 16000:
@@ -124,14 +124,30 @@ def _argv(key, value):
 
 
 def _validate_heldout(spec, repo):
-    """A declared held-out suite must live outside the candidate's reachable source."""
+    """A declared held-out suite must live outside the candidate's reachable source.
+
+    Two ways to satisfy that: ``heldout_assets`` (a directory mounted read-only at
+    ``/heldout``) or ``heldout_patch`` (a diff applied to a throwaway copy of the candidate,
+    the shape a real pull request has when it adds test cases to existing files).
+    """
     if 'heldout' in spec:
         spec['heldout'] = _argv('heldout', spec['heldout'])
+    hidden_patch = spec.get('heldout_patch')
+    if hidden_patch is not None:
+        if 'heldout' not in spec:
+            raise ValueError('heldout_patch requires heldout: a patch with no suite does nothing')
+        candidate = Path(hidden_patch)
+        if not candidate.is_absolute() or not candidate.is_file():
+            raise ValueError('heldout_patch must be an existing absolute file')
+        candidate = candidate.resolve()
+        if candidate.is_relative_to(repo):
+            raise ValueError('heldout_patch must live outside the repository')
+        spec['heldout_patch'] = str(candidate)
     assets = spec.get('heldout_assets')
     if assets is None:
-        if 'heldout' in spec:
-            raise ValueError('heldout requires heldout_assets: the hidden suite must live '
-                             'outside the candidate workspace')
+        if 'heldout' in spec and hidden_patch is None:
+            raise ValueError('heldout requires heldout_assets or heldout_patch: the hidden '
+                             'material must live outside the candidate workspace')
         return
     if not isinstance(assets, list) or not assets:
         raise ValueError('heldout_assets must be a nonempty list')
