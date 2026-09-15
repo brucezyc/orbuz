@@ -221,12 +221,21 @@ def test_no_soft_limits_never_caps_and_money_is_not_guessed():
 def test_prefix_guard_flags_only_real_changes():
     guard = PrefixGuard()
     tools = [{'function': {'name': 'read_file'}}]
-    first = guard.observe([{'role': 'system', 'content': 'frozen prefix'}], tools)
-    assert first['stable'] is True
-    again = guard.observe([{'role': 'system', 'content': 'frozen prefix'}], tools)
-    assert again['stable'] is True and guard.busts == []
-    changed = guard.observe([{'role': 'system', 'content': 'frozen prefix + timestamp 12:00'}], tools)
+    system = {'role': 'system', 'content': 'frozen prefix'}
+    brief = {'role': 'user', 'content': '{"goal": "x"}'}
+    first = guard.observe([system, brief], tools)
+    assert first['stable'] is True and first['prefix_chars'] > 0
+    # A growing transcript is append-only: it must never be reported as a cache bust.
+    grown = guard.observe([system, brief, {'role': 'user', 'content': 'work'},
+                           {'role': 'assistant', 'content': 'ack'}], tools)
+    assert grown['stable'] is True and guard.busts == []
+    # A trailing volatile note is expected to change every step and is not part of the prefix.
+    noted = guard.observe([system, brief, {'role': 'user', 'content': 'Situation: {"calls": 3}'}], tools)
+    assert noted['stable'] is True and guard.busts == []
+    changed = guard.observe([system, {'role': 'user', 'content': '{"goal": "x", "ts": 1}'}], tools)
     assert changed['stable'] is False and changed['bust'] == 1 and len(guard.busts) == 1
+    retooled = guard.observe([system, brief], [{'function': {'name': 'command'}}])
+    assert retooled['stable'] is False and len(guard.busts) == 2
 
 
 # ---------- stall ----------

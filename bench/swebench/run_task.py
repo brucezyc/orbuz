@@ -108,6 +108,8 @@ def main():
                      for a in final['attempts']],
         'journal_steps': len(rt.journal.steps(task_id)),
         'prefix_cache': final.get('cache'),
+        'budget': {k: (final.get('budget') or {}).get(k) for k in
+                   ('calls', 'total_tokens', 'cache_hits', 'cache_misses', 'cache_hit_ratio')},
         'pins': len(final.get('pins') or []),
         'workspace': final.get('workspace'),
     }, indent=2, ensure_ascii=False))

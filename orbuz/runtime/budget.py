@@ -145,8 +145,22 @@ class PrefixGuard:
         self.checks = 0
 
     def observe(self, messages, tools):
-        """Returns {'stable': bool, 'bust': int, 'fingerprint': str}."""
-        payload = json.dumps({'messages': messages, 'tools': tools}, sort_keys=True,
+        """Fingerprint only what must stay byte-identical for provider cache hits.
+
+        That is the leading system block plus the request message right after it (the task
+        brief), and the tool schemas. Transcript turns are append-only and volatile
+        bookkeeping is kept in a trailing note, so hashing the whole payload would report a
+        bust on every step and hide the busts that matter (an injected timestamp, a reordered
+        tool list, a rewritten brief).
+
+        Returns {'stable': bool, 'bust': int, 'fingerprint': str, 'prefix_chars': int}.
+        """
+        leading = []
+        for message in messages:
+            leading.append(message)
+            if message.get('role') != 'system':
+                break
+        payload = json.dumps({'messages': leading, 'tools': tools}, sort_keys=True,
                              ensure_ascii=False, default=str)
         fingerprint = hashlib.sha256(payload.encode()).hexdigest()
         self.checks += 1
@@ -156,7 +170,8 @@ class PrefixGuard:
             if self.watcher is not None:
                 self.watcher(self.busts[-1], self.fingerprint, fingerprint)
         self.fingerprint = fingerprint
-        return {'stable': stable, 'bust': len(self.busts), 'fingerprint': fingerprint}
+        return {'stable': stable, 'bust': len(self.busts), 'fingerprint': fingerprint,
+                'prefix_chars': len(payload)}
 
     def snapshot(self):
         return {'checks': self.checks, 'busts': len(self.busts),

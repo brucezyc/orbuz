@@ -219,6 +219,7 @@ class Runtime:
 
                     messages, compacted = self._manage_context(task, messages, model, spec)
                     messages = bounded_context(messages, TOOLS, lambda: self.context(task))
+                    messages = self.with_situation(task, messages)
                     task['cache'] = prefix.observe(pinning.sanitize_for_model(messages), TOOLS)
                     if compacted is not None:
                         attempt['compaction'] = {'strategy': compacted.strategy,
@@ -588,20 +589,39 @@ class Runtime:
                 excerpt = p.read_text()[:min(4000, 32000 - context_chars)]
                 files.append({'path': name, 'excerpt': excerpt})
                 context_chars += len(excerpt)
-        prior = [{'status': a['status'], 'workspace': a['workspace'],
-                  'error': str(a.get('error') or '')[:1000],
-                  'evidence': {k: a.get('evidence', {}).get(k) for k in
-                               ('exit_code', 'revision', 'log_path', 'output')} if a.get('evidence') else None}
-                 for a in task['attempts'][:-1][-8:]]
+        # The brief carries only what never changes mid-task: provider prompt caching keys on a
+        # byte-stable prefix, so anything volatile (call budget, journal, earlier attempts) goes
+        # into a situation note that is kept last and updated in place.
         brief = {'goal': spec['goal'], 'base_revision': spec['base_revision'],
                  'writable': spec['writable'], 'acceptance': spec['acceptance'],
                  'heldout': 'a hidden held-out suite also runs; passing the visible suite alone is not enough'
                  if acceptance.heldout_present(spec) else 'none declared',
-                 'files': files, 'prior_attempts': prior,
-                 'remaining_calls': spec['max_calls'] - task['calls'],
-                 'journal': self.journal.resume_plan(task['id'])}
+                 'files': files}
         messages = [{'role': 'system', 'content': SYSTEM_PROMPT},
                     {'role': 'user', 'content': json.dumps(brief, ensure_ascii=False)}]
         for pinned in task.get('pins') or []:
             messages.append(dict(pinned))
         return messages
+
+    def situation(self, task):
+        """Volatile bookkeeping, kept as the last message so it never breaks the cached prefix."""
+        spec = task['contract']
+        prior = [{'status': a['status'],
+                  'error': str(a.get('error') or '')[:600],
+                  'evidence': {k: a.get('evidence', {}).get(k) for k in
+                               ('exit_code', 'revision', 'log_path', 'output')}
+                  if a.get('evidence') else None}
+                 for a in task['attempts'][:-1][-8:]]
+        payload = {'remaining_calls': spec['max_calls'] - task['calls'],
+                   'steps_this_call': (spec.get('limits') or {}).get('max_steps'),
+                   'journal': self.journal.resume_plan(task['id']),
+                   'prior_attempts': prior}
+        return {'role': 'user', 'content': 'Situation: ' + json.dumps(payload, ensure_ascii=False),
+                pinning.PRIVATE_KEY: {'situation': 'longrun.situation.v1'}}
+
+    def with_situation(self, task, messages):
+        """Replace the trailing situation note (never duplicate it)."""
+        cleaned = [m for m in messages if not (isinstance(m, dict)
+                   and isinstance(m.get(pinning.PRIVATE_KEY), dict)
+                   and m[pinning.PRIVATE_KEY].get('situation'))]
+        return [*cleaned, self.situation(task)]

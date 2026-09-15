@@ -41,9 +41,13 @@ def test_context_is_bounded_and_keeps_failure_diagnostics(project, tmp_path):
     task = rt.create(contract(project))
     result = rt.run(task, Scripted([('submit', {})]))
     result['attempts'].append({'workspace': result['workspace'], 'status': 'running'})
-    context = json.loads(rt.context(result)[1]['content'])
-    assert 'AssertionError' in context['prior_attempts'][0]['evidence']['output']
-    assert len(json.dumps(context)) < 100000
+    brief = json.loads(rt.context(result)[1]['content'])
+    # The brief holds only what never changes mid-task (the cached prefix); earlier-attempt
+    # diagnostics ride in the trailing situation note so a resume cannot bust that prefix.
+    situation = json.loads(rt.situation(result)['content'].removeprefix('Situation: '))
+    assert 'AssertionError' in situation['prior_attempts'][0]['evidence']['output']
+    assert 'prior_attempts' not in brief and 'remaining_calls' not in brief
+    assert len(json.dumps(situation)) < 100000
 
 
 def test_real_process_crash_reconciles_without_replay(project, tmp_path):

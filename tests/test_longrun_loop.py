@@ -353,3 +353,21 @@ def test_prefix_guard_reports_a_stable_prefix_across_resumes(project, tmp_path, 
     assert first['status'] == 'capped'
     assert first['cache']['stable'] is True
     assert first['cache']['bust'] == 0
+
+
+def test_brief_is_byte_stable_across_steps_and_resumes(project, tmp_path, monkeypatch):
+    """Prompt-cache discipline: only the trailing situation note may change between steps."""
+    monkeypatch.setattr(engine_mod.context_mod, 'should_compact', lambda messages, limit: False)
+    rt = Runtime(tmp_path / 'state')
+    task = rt.create(contract(project, limits={'max_steps': 3}))
+    model = Scripted([('write_file', {'path': 'answer.py', 'content': GOOD}),
+                      ('read_file', {'path': 'answer.py'}),
+                      ('submit', {})])
+    first = rt.run(task, model)
+    assert first['status'] in ('capped', 'accepted')
+    second = rt.run(task, Scripted([('submit', {})]))
+    assert second['cache']['stable'] is True and second['cache']['bust'] == 0
+    briefs = [messages[1]['content'] for messages in model.seen]
+    assert len(set(briefs)) == 1                      # identical bytes on every request
+    assert all('"remaining_calls"' not in b for b in briefs)   # volatility lives elsewhere
+    assert any('Situation:' in messages[-1]['content'] for messages in model.seen)
