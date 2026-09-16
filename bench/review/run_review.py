@@ -184,8 +184,12 @@ def run_case(case_dir, state_dir, model_name, base_url, env_file, selected, max_
               'cost': {'calls': sum(r.get('calls') or 0 for r in results.values()),
                        'tokens': sum(r.get('tokens') or 0 for r in results.values())},
               'hits': [n for n, r in results.items() if (r.get('score') or (False,))[0]]}
-    (case_dir / 'review-report.json').write_text(json.dumps(report, indent=2))
-    print(json.dumps({'case': case_dir.name, 'merged_findings': len(merged),
+    # One file per configuration: the fan-out report and the baseline report must both survive
+    # the comparison, and a shared filename silently loses whichever ran first.
+    mode = 'baseline' if len(selected) == 1 and selected[0]['name'].startswith('generalist') \
+        else 'fanout'
+    (case_dir / f'review-{mode}.json').write_text(json.dumps(report, indent=2))
+    print(json.dumps({'case': case_dir.name, 'mode': mode, 'merged_findings': len(merged),
                       'merged_hit': merged_score[0], 'cost': report['cost'],
                       'agents_hit': [n for n, r in results.items() if r['score'][0]]}))
     return report
