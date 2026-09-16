@@ -17,6 +17,8 @@ import argparse
 import json
 import os
 import shutil
+import time
+from concurrent.futures import ThreadPoolExecutor
 import subprocess
 import sys
 from pathlib import Path
@@ -160,29 +162,50 @@ def score(case_dir, findings_path):
 
 
 def run_case(case_dir, state_dir, model_name, base_url, env_file, selected, max_calls,
-             max_steps=40, tag=''):
+             max_steps=40, tag='', concurrency=6):
     meta = json.loads((case_dir / 'meta.json').read_text())
     mode = 'baseline' if len(selected) == 1 and selected[0]['name'].startswith('generalist') \
         else 'fanout'
     instance_repo = Path('/root/bench/tasks') / meta['instance'] / 'repo'
     goal = (case_dir / 'goal.md').read_text()
     tree = review_tree(case_dir, instance_repo, (case_dir / 'candidate.patch').read_text(), mode)
+
+    # Tasks are created one at a time. A repository has one index, and two worktree adds racing
+    # for it is how a parallel instrument reports contract errors instead of results.
     runtime = Runtime(state_dir)
-    model = ChatModel(model_name, base_url, 'ORBUZ_KEY')
-    results, findings_by_persona = {}, {}
-    try:
-        for persona in selected:
-            try:
-                spec = runtime.create(contract_for(case_dir, goal, tree, persona, max_calls, max_steps))
-            except Exception as exc:
-                # One unusable persona must not cost the other agents their results.
-                results[persona['name']] = {'status': 'contract_error',
-                                            'detail': f'{type(exc).__name__}: {exc}'[:200]}
-                print(json.dumps({'case': case_dir.name, 'agent': persona['name'],
-                                  'status': 'contract_error'}), flush=True)
-                continue
-            outcome = runtime.run(spec, model)
-            findings_path = Path(outcome['workspace']) / f"findings-{persona['name']}.json"
+    created, results, findings_by_persona = [], {}, {}
+    for persona in selected:
+        try:
+            created.append((persona,
+                            runtime.create(contract_for(case_dir, goal, tree, persona,
+                                                        max_calls, max_steps))))
+        except Exception as exc:
+            # One unusable persona must not cost the other agents their results.
+            results[persona['name']] = {'status': 'contract_error',
+                                        'detail': f'{type(exc).__name__}: {exc}'[:200]}
+            print(json.dumps({'case': case_dir.name, 'agent': persona['name'],
+                              'status': 'contract_error'}), flush=True)
+
+    # The runs themselves go in parallel: that is the point of several agents, and a runner that
+    # serialises them cannot measure it. Each worker gets its own Runtime and its own client so
+    # journals and connections are not shared, and the clock is recorded per agent and per arm.
+    def one(item):
+        persona, task = item
+        worker, client = Runtime(state_dir), ChatModel(model_name, base_url, 'ORBUZ_KEY')
+        begin = time.monotonic()
+        try:
+            outcome = worker.run(task, client)
+        except Exception as exc:
+            outcome = {'status': 'failed', 'error': f'{type(exc).__name__}: {exc}'[:200],
+                       'calls': 0, 'workspace': ''}
+        finally:
+            client.close()
+        return persona, outcome, round(time.monotonic() - begin, 1)
+
+    arm_start = time.monotonic()
+    with ThreadPoolExecutor(max_workers=max(1, concurrency)) as pool:  # noqa: SIM117
+        for persona, outcome, seconds in pool.map(one, created):
+            findings_path = Path(outcome.get('workspace') or '.') / f"findings-{persona['name']}.json"
             try:
                 findings = json.loads(findings_path.read_text())
             except Exception:
@@ -190,7 +213,7 @@ def run_case(case_dir, state_dir, model_name, base_url, env_file, selected, max_
             findings_by_persona[persona['name']] = findings if isinstance(findings, list) else []
             results[persona['name']] = {
                 'status': outcome['status'], 'error': outcome.get('error'),
-                'calls': outcome['calls'],
+                'calls': outcome['calls'], 'seconds': seconds,
                 'journal_steps': outcome.get('journal_steps'),
                 'tokens': (outcome.get('budget') or {}).get('total_tokens'),
                 'findings': len(findings) if isinstance(findings, list) else 0,
@@ -198,10 +221,9 @@ def run_case(case_dir, state_dir, model_name, base_url, env_file, selected, max_
             }
             print(json.dumps({'case': case_dir.name, 'agent': persona['name'],
                               **{k: results[persona['name']][k] for k in
-                                 ('status', 'calls', 'findings', 'tokens')},
+                                 ('status', 'calls', 'seconds', 'findings', 'tokens')},
                               'hit': results[persona['name']]['score'][0]}), flush=True)
-    finally:
-        model.close()
+    wall_clock = round(time.monotonic() - arm_start, 1)
 
     merged = merge(findings_by_persona)
     merged_path = case_dir / 'merged-findings.json'
@@ -211,14 +233,16 @@ def run_case(case_dir, state_dir, model_name, base_url, env_file, selected, max_
               'agents': results, 'merged': {'findings': len(merged), 'agents': len(selected),
                                             'score': merged_score},
               'cost': {'calls': sum(r.get('calls') or 0 for r in results.values()),
-                       'tokens': sum(r.get('tokens') or 0 for r in results.values())},
+                       'tokens': sum(r.get('tokens') or 0 for r in results.values()),
+                       'concurrency': concurrency, 'wall_clock_s': wall_clock,
+                       'agent_seconds': sum(r.get('seconds') or 0 for r in results.values())},
               'hits': [n for n, r in results.items() if (r.get('score') or (False,))[0]]}
     # One file per configuration: the fan-out report and the baseline report must both survive
     # the comparison, and a shared filename silently loses whichever ran first.
     (case_dir / f'review-{mode}{tag}.json').write_text(json.dumps(report, indent=2))
     print(json.dumps({'case': case_dir.name, 'mode': mode, 'merged_findings': len(merged),
                       'merged_hit': merged_score[0], 'cost': report['cost'],
-                      'agents_hit': [n for n, r in results.items() if (r.get('score') or (False,))[0]]}))
+                      'agents_hit': report['hits']}))
     return report
 
 
@@ -241,6 +265,8 @@ def main():
                         help='tool steps per run: a budget arm cut short here is not a fair '
                              'comparison, whatever its call budget says')
     parser.add_argument('--tag', default='', help='suffix for the report filename')
+    parser.add_argument('--concurrency', type=int, default=6,
+                        help='agents run at once: the axis a serialised runner cannot measure')
     args = parser.parse_args()
 
     only = None if args.personas == 'all' else set(args.personas.split(','))
@@ -278,7 +304,7 @@ def main():
                               'max_calls': spec['max_calls'], 'max_seconds': spec['max_seconds']}))
         return
     run_case(Path(args.case_dir), args.state_dir, args.model, args.base_url, args.env_file,
-             available, args.max_calls, args.max_steps, args.tag)
+             available, args.max_calls, args.max_steps, args.tag, args.concurrency)
 
 
 if __name__ == '__main__':
