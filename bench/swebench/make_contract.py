@@ -88,11 +88,22 @@ def main():
         raise SystemExit('No hidden node ids resolved; are the FAIL_TO_PASS names in '
                          + ', '.join(files_after))
 
-    package_dirs = sorted({str(Path(f).parent.parent) for f in files})
+    # Scope the writable allowlist to the package the tests exercise. Two shapes:
+    # tests inside the package (sympy/matrices/expressions/tests/...) or a flat tests/ dir
+    # (requests/tests/...). Never the gold patch's files - that would name the answer.
+    repo_name = Path(row['repo']).name
+    package_dirs = sorted({str(Path(f).parent.parent) for f in files} - {'.', ''})
+    if not package_dirs and (Path(repo) / repo_name).is_dir():
+        package_dirs = [repo_name]          # flat tests/ dir: the package named after the repo
+    if not package_dirs:
+        raise SystemExit('Cannot infer which package to scope from: ' + ', '.join(files))
     writable = []
     for directory in package_dirs:
-        for path in sorted((repo / directory).glob('*.py')):
+        base = repo / directory
+        for path in sorted(base.rglob('*.py')):
             rel = path.relative_to(repo).as_posix()
+            if 'tests/' in rel or rel.startswith('test_') or '/test_' in rel:
+                continue
             if rel not in writable:
                 writable.append(rel)
     if not writable:
