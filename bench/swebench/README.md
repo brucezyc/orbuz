@@ -53,6 +53,17 @@ The contract keeps the localisation answer out of the candidate's hands:
 | `heldout_patch` | the PR's `test_patch` | applied to a throwaway copy of the candidate |
 | `context` | empty | the model must explore with its tools |
 
+## Selecting a usable instance (offline gate)
+
+The sandbox has no network, so an instance is usable only if its tests pass offline:
+
+1. `runner.py <id> --suite visible` must be green at the base commit. A red visible suite
+   means the tests need the network (many 2013-2015 era `requests` tests call httpbin) or the
+   environment is wrong - the task is unusable either way.
+2. Prefer instances whose FAIL_TO_PASS tests are reachable from a package you can scope.
+3. Node ids come in two shapes: bare names and fully qualified `file::Class::name`. Both are
+   accepted; unresolvable names are reported, never silently dropped.
+
 ## Verified facts (2026-09-15, measured on 111)
 
 - Sandbox runs the real sympy suite offline: 20 passed, no network.

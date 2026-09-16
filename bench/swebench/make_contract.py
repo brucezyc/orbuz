@@ -29,15 +29,25 @@ PYTEST = ['/usr/bin/python3', '-B', '-m', 'pytest', '-q', '-p', 'no:cacheprovide
 
 
 def node_ids(root, files, names):
-    """file::name node ids, mapped by reading the working tree (names repeat across files)."""
-    mapping, unmapped = {}, []
+    """Resolve test names to runnable node ids.
+
+    The dataset mixes two shapes: full ids that already carry a file and a class
+    (``test_requests.py::RequestsTestCase::test_x``) and bare names that must be located in
+    the files the eval_script runs. Both are supported; bare names that cannot be located are
+    reported rather than silently dropped.
+    """
+    resolved, unmapped, mapping = [], [], {}
     for name in names:
+        if '::' in name:
+            resolved.append(name)
+            continue
         hit = next((f for f in files if f'def {name}(' in (Path(root) / f).read_text()), None)
         if hit:
             mapping.setdefault(hit, []).append(name)
         else:
             unmapped.append(name)
-    return [f'{f}::{n}' for f, group in mapping.items() for n in group], unmapped
+    resolved += [f'{f}::{n}' for f, group in mapping.items() for n in group]
+    return resolved, unmapped
 
 
 def hidden_tree(repo, test_patch_text, destination):

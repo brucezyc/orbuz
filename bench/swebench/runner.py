@@ -30,12 +30,19 @@ def apply_patch(root, text, name):
 
 
 def node_map(root, files, names):
-    """Map bare test names to file::name node ids by reading the patched working tree."""
-    mapping, unmapped = {}, []
+    """Resolve test names to node ids, accepting fully qualified ids as they come."""
+    qualified, mapping, unmapped = [], {}, []
     for name in names:
+        if '::' in name:
+            qualified.append(name)
+            continue
         hit = next((f for f in files if f'def {name}(' in (Path(root) / f).read_text()), None)
-        (mapping.setdefault(hit, []).append(name) if hit else unmapped.append(name))
-    return mapping, unmapped
+        if hit:
+            mapping.setdefault(hit, []).append(name)
+        else:
+            unmapped.append(name)
+    nodes = [f'{f}::{n}' for f, group in mapping.items() for n in group]
+    return qualified, nodes, unmapped
 
 
 def sandbox_run(workspace, nodes, log_path, orbuz='/root/orbuz', timeout=900):
@@ -81,8 +88,8 @@ def main():
               'test_files': files, 'suites': {}}
     for suite in (('visible', 'heldout') if args.suite == 'both' else (args.suite,)):
         names = as_list(row['PASS_TO_PASS'] if suite == 'visible' else row['FAIL_TO_PASS'])
-        mapping, unmapped = node_map(work, files, names)
-        nodes = [f'{f}::{n}' for f, group in mapping.items() for n in group]
+        qualified, mapped, unmapped = node_map(work, files, names)
+        nodes = [*qualified, *mapped]
         if not nodes:
             report['suites'][suite] = {'nodes': 0, 'exit': None, 'unmapped': unmapped,
                                        'note': 'no matching test file in this tree'}
