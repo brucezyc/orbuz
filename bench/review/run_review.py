@@ -230,8 +230,10 @@ def run_case(case_dir, state_dir, model_name, base_url, env_file, selected, max_
     merged_path.write_text(json.dumps(merged, indent=2))
     merged_score = score(case_dir, merged_path)
     report = {'case': case_dir.name, 'instance': meta['instance'], 'control': meta.get('control', False),
-              'agents': results, 'merged': {'findings': len(merged), 'agents': len(selected),
-                                            'score': merged_score},
+              'agents': results, 'tasks': {p['name']: t for p, t in created},
+              'merged': {'findings': len(merged), 'agents': len(selected),
+                         'score': merged_score, 'items': merged},
+              'per_agent_findings': findings_by_persona,
               'cost': {'calls': sum(r.get('calls') or 0 for r in results.values()),
                        'tokens': sum(r.get('tokens') or 0 for r in results.values()),
                        'concurrency': concurrency, 'wall_clock_s': wall_clock,
