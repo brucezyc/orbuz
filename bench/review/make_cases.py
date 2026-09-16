@@ -41,6 +41,9 @@ COMPARISONS = [('==', '!='), ('!=', '=='), ('<=', '<'), ('>=', '>'), ('<', '<=')
 WORDS = [('True', 'False'), ('False', 'True'), (' and ', ' or '), (' or ', ' and ')]
 NUMBER = re.compile(r'(?<![A-Za-z_.\d])(\d+)(?![A-Za-z_.\d])')
 
+SLUG = {'==->!=': 'ne', '!=->==': 'eq', '<=-><': 'lt', '>=->>': 'gt', '<-><=': 'le',
+        '>->>=': 'ge', 'True->False': 'false', 'False->True': 'true',
+        ' and -> or ': 'or', ' or -> and ': 'and'}
 SCORER = '''"""Score a review against the hidden defect. Deterministic, no model calls.
 
 A finding is a hit when it names the mutated file and lands within {tolerance} lines of the
@@ -102,12 +105,17 @@ def added_lines(patch_text):
         if header:
             new_line = int(header.group(1))
             continue
-        if line.startswith('+++') or line.startswith('---'):
+        if line.startswith('+++') or line.startswith('---') or line.startswith('@@'):
             continue
         if line.startswith('+'):
-            found.append({'index': index, 'file': file, 'line': new_line, 'text': line[1:]})
+            found.append({'index': index, 'file': file, 'line': new_line, 'text': line[1:],
+                          'origin': 'added'})
             new_line += 1
         elif line.startswith(' '):
+            # Context lines matter too: a submitted patch can be wrong about the code it sits
+            # next to, and a reviewer cannot tell which line the author thinks is the fix.
+            found.append({'index': index, 'file': file, 'line': new_line, 'text': line[1:],
+                          'origin': 'context'})
             new_line += 1
     return found
 
@@ -130,8 +138,8 @@ def mutants(patch_text):
             text = '\n'.join([*lines[:entry['index']], '+' + mutated,
                               *lines[entry['index'] + 1:]]) + '\n'
             out.append({'patch': text, 'path': entry['file'], 'line': entry['line'],
-                        'kind': f'{old}->{new}', 'before': entry['text'].rstrip(),
-                        'after': mutated.rstrip()})
+                        'origin': entry['origin'], 'kind': f'{old}->{new}',
+                        'before': entry['text'].rstrip(), 'after': mutated.rstrip()})
     return out
 
 
@@ -170,6 +178,8 @@ def main():
     parser.add_argument('--max-cases', type=int, default=6)
     parser.add_argument('--tolerance', type=int, default=3,
                         help='lines either side of the defect that still count as a hit')
+    parser.add_argument('--include-control', action='store_true',
+                        help='also emit the unmutated patch as a false-positive control')
     parser.add_argument('--include-loud', action='store_true',
                         help='keep mutants the visible suite already catches (default: only subtle)')
     args = parser.parse_args()
@@ -184,8 +194,27 @@ def main():
     logs.mkdir(parents=True, exist_ok=True)
 
     cases, rejected = [], 0
+    if args.include_control:
+        control_dir = out_root / 'c0-control'
+        (control_dir / 'hidden').mkdir(parents=True, exist_ok=True)
+        (control_dir / 'candidate.patch').write_text(row['patch'])
+        (control_dir / 'goal.md').write_text(
+            '# Review this candidate patch\n\nThe patch below was submitted as the fix for the\n'
+            'issue. Report every defect you can defend. If the patch is sound, report nothing: a\n'
+            'finding that names the wrong place costs the same as one that names nothing. Write\n'
+            '`findings.json` as a list of objects with `path`, `line`, `kind`, `severity`, `why`.\n\n'
+            '## Reported issue\n\n' + row['problem_statement'].strip() + '\n\n'
+            '## Candidate patch\n\n```diff\n' + row['patch'].strip() + '\n```\n')
+        (control_dir / 'hidden' / 'ground_truth.json').write_text(
+            json.dumps({'control': True, 'note': 'the unmutated patch: any finding is a false positive'},
+                       indent=2))
+        (control_dir / 'hidden' / 'score.py').write_text(SCORER.format(tolerance=args.tolerance))
+        (control_dir / 'meta.json').write_text(json.dumps(
+            {'instance': args.instance_id, 'case': 'c0-control', 'control': True}, indent=2))
+        cases.append('c0-control')
+        print(json.dumps({'case': 'c0-control', 'control': True}))
     for number, mutant in enumerate(mutants(row['patch']), 1):
-        if len(cases) >= args.max_cases:
+        if len([c for c in cases if c != 'c0-control']) >= args.max_cases:
             break
         measured = measure(repo_dir, row, mutant['patch'], scratch, logs)
         mutant['measured'] = measured
@@ -194,7 +223,7 @@ def main():
         if measured['heldout_exit'] in (0, None) or (not subtle and not args.include_loud):
             rejected += 1                      # the held-out suite misses it, or visible already
             continue                           # catches it: not a defect worth a reviewer
-        case_id = f"m{number}-{re.sub(r'[^a-z0-9]+', '-', mutant['kind'].lower())}"
+        case_id = f"m{number}-{SLUG.get(mutant['kind'], re.sub(r'[^a-z0-9]+', '', mutant['kind'].lower()))}"
         case_dir = out_root / case_id
         (case_dir / 'hidden').mkdir(parents=True, exist_ok=True)
         (case_dir / 'candidate.patch').write_text(mutant['patch'])
