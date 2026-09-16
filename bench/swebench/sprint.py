@@ -86,6 +86,17 @@ def sprint(args):
         git(repo_dir, 'config', 'user.email', 'sprint@example.invalid')
         git(repo_dir, 'config', 'user.name', 'Sprint')
     records, carry_commit = [], None
+
+    def close():
+        """Write what happened so far: a sprint that stops early is a result, not a crash."""
+        (sprint_dir / 'sprint.json').write_text(json.dumps(
+            {'sprint': sprint_dir.name, 'repo': args.repo, 'instances': records,
+             'carry_commit': carry_commit,
+             'totals': {'accepted': sum(r.get('status') == 'accepted' for r in records),
+                        'calls': sum(r.get('calls') or 0 for r in records),
+                        'tokens': sum((r.get('budget') or {}).get('total_tokens') or 0
+                                      for r in records)}}, indent=2))
+
     for index, row in enumerate(selected, 1):
         base = row['base_commit']
         record = {'instance': row['instance_id'], 'base_commit': base[:10], 'index': index}
@@ -96,8 +107,10 @@ def sprint(args):
             if picked.returncode:
                 git(repo_dir, 'cherry-pick', '--abort', check=False)
                 record['carry'] = 'conflict'
-                record['detail'] = picked.stderr.strip().splitlines()[-1][:200] if picked.stderr.strip() else ''
+                lines = [line for line in picked.stderr.strip().splitlines() if line.strip()]
+                record['detail'] = lines[-1][:200] if lines else ''
                 records.append(record)
+                close()
                 break
             record['carry'] = 'carried'
         else:
@@ -114,8 +127,9 @@ def sprint(args):
             record['status'] = 'unusable_carry'
             record['detail'] = (built.stderr.strip() or built.stdout.strip())[:250]
             records.append(record)
+            close()
             break
-        record['contract'] = json.loads(last_json(built.stdout) or '{}')
+        record['contract'] = last_json(built.stdout) or {}
 
         if args.dry_run:
             record['status'] = 'dry_run'
@@ -141,6 +155,7 @@ def sprint(args):
         if not workspace or not Path(workspace).is_dir():
             record['carry'] = 'lost: no workspace to carry'
             records.append(record)
+            close()
             break
         git(workspace, 'add', '-A')
         committed = git(workspace, '-c', 'user.email=sprint@example.invalid',
@@ -149,6 +164,7 @@ def sprint(args):
         if committed.returncode and 'nothing to commit' not in (committed.stdout + committed.stderr):
             record['carry'] = 'lost: could not commit workspace'
             records.append(record)
+            close()
             break
         carry_commit = git(workspace, 'rev-parse', 'HEAD').stdout.strip()
         record['carry_commit'] = carry_commit[:10]
