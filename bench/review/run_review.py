@@ -253,11 +253,12 @@ def main():
         goal = (case_dir / 'goal.md').read_text()
         runtime = Runtime(args.state_dir)
         for persona in available:
-            spec = runtime.create(contract_for(case_dir, goal, tree, persona, args.max_calls))
-            print(json.dumps({'agent': persona['name'], 'goal_chars': len(spec['goal']),
-                              'writable': spec['writable'], 'heldout': spec['heldout'],
-                              'assets': spec['heldout_assets'], 'max_calls': spec['max_calls'],
-                              'max_seconds': spec['max_seconds'], 'limits': spec['limits']}))
+            spec = contract_for(case_dir, goal, tree, persona, args.max_calls)
+            task = runtime.create(spec)          # create validates: this is the point of dry-run
+            print(json.dumps({'agent': persona['name'], 'task': task,
+                              'goal_chars': len(spec['goal']), 'writable': spec['writable'],
+                              'heldout': spec['heldout'], 'assets': spec['heldout_assets'],
+                              'max_calls': spec['max_calls'], 'max_seconds': spec['max_seconds']}))
         return
     run_case(Path(args.case_dir), args.state_dir, args.model, args.base_url, args.env_file,
              available, args.max_calls)
