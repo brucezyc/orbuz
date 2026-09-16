@@ -38,7 +38,11 @@ import runner                     # noqa: E402
 
 HUNK = re.compile(r'^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@')
 COMPARISONS = [('==', '!='), ('!=', '=='), ('<=', '<'), ('>=', '>'), ('<', '<='), ('>', '>=')]
-WORDS = [('True', 'False'), ('False', 'True'), (' and ', ' or '), (' or ', ' and ')]
+WORDS = [('True', 'False'), ('False', 'True'), (' and ', ' or '), (' or ', ' and '),
+         ('is not None', 'is None'), ('is None', 'is not None'),
+         ('startswith', 'endswith'), ('endswith', 'startswith'),
+         ('min(', 'max('), ('max(', 'min('),
+         (' + 1', ' - 1'), (' - 1', ' + 1'), ('* -1', '* 1')]
 NUMBER = re.compile(r'(?<![A-Za-z_.\d])(\d+)(?![A-Za-z_.\d])')
 
 SLUG = {'==->!=': 'ne', '!=->==': 'eq', '<=-><': 'lt', '>=->>': 'gt', '<-><=': 'le',
@@ -172,7 +176,7 @@ def measure(repo_dir, row, patch_text, scratch, logs):
 def main():
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument('instance_id')
+    parser.add_argument('instance_id', nargs='?')
     parser.add_argument('--root', default='/root/bench')
     parser.add_argument('--cache', default='/root/bench/data/verified.json')
     parser.add_argument('--max-cases', type=int, default=6)
@@ -180,8 +184,8 @@ def main():
                         help='lines either side of the defect that still count as a hit')
     parser.add_argument('--include-control', action='store_true',
                         help='also emit the unmutated patch as a false-positive control')
-    parser.add_argument('--include-loud', action='store_true',
-                        help='keep mutants the visible suite already catches (default: only subtle)')
+    parser.add_argument('--subtle-only', action='store_true',
+                        help='keep only mutants the visible suite misses (the interesting kind)')
     args = parser.parse_args()
 
     row = fetch.load(args.instance_id, args.cache)
@@ -220,9 +224,12 @@ def main():
         mutant['measured'] = measured
         subtle = measured['visible_exit'] == 0 and measured['heldout_exit'] not in (0, None)
         mutant['subtle'] = subtle
-        if measured['heldout_exit'] in (0, None) or (not subtle and not args.include_loud):
-            rejected += 1                      # the held-out suite misses it, or visible already
-            continue                           # catches it: not a defect worth a reviewer
+        if measured['heldout_exit'] in (0, None) or (args.subtle_only and not subtle):
+            # The held-out suite does not react to this mutation: it is not a defect, it is a
+            # change of behaviour nobody can call wrong. Subtle-only also drops the mutations
+            # the project's own suite already catches.
+            rejected += 1
+            continue
         case_id = f"m{number}-{SLUG.get(mutant['kind'], re.sub(r'[^a-z0-9]+', '', mutant['kind'].lower()))}"
         case_dir = out_root / case_id
         (case_dir / 'hidden').mkdir(parents=True, exist_ok=True)
