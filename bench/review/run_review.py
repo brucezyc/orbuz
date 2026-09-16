@@ -36,6 +36,24 @@ SHAPE_CHECK = ("import json;d=json.load(open('{name}'));assert isinstance(d,list
 def personas_of(repo, only=None):
     """The repository's always-on reviewers, in the order its index declares them."""
     index = yaml.safe_load((Path(repo) / 'agents' / 'index.yaml').read_text())['agents']
+    if only == {'merged'}:
+        # The equal-cost baseline: one agent holding every always-on concern, run with the
+        # budget the whole fan-out gets. Without this, "more agents are better" can be bought
+        # by spending more, and the comparison would say nothing about the shape.
+        always = [e for e in index]
+        principles, constraints = [], []
+        for entry in always:
+            path = Path(repo) / 'agents' / entry['file']
+            if not path.exists():
+                continue
+            definition = yaml.safe_load(path.read_text()) or {}
+            if definition.get('persona_tier') != 'always_on':
+                continue
+            principles += [f"[{entry['name']}] {p}" for p in (definition.get('principles') or [])]
+            constraints += [f"[{entry['name']}] {c}" for c in (definition.get('constraints') or [])]
+        return [{'name': 'generalist-equal-cost',
+                 'summary': f'one reviewer carrying all {len(always)} always-on concerns',
+                 'principles': principles, 'constraints': constraints}]
     chosen = []
     for entry in index:
         path = Path(repo) / 'agents' / entry['file']
