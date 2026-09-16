@@ -95,6 +95,8 @@ def main():
     parser.add_argument('--root', default='/root/bench')
     parser.add_argument('--cache', default='/root/bench/data/verified.json')
     parser.add_argument('--out')
+    parser.add_argument('--repo', help='build against this repository instead of the '
+                                       "per-instance clone; a sprint carries work forward")
     parser.add_argument('--max-calls', type=int, default=40)
     parser.add_argument('--max-seconds', type=float, default=1500)
     parser.add_argument('--steps-per-run', type=int, default=6)
@@ -102,7 +104,7 @@ def main():
 
     row = load(args.instance_id, args.cache)
     task = Path(args.root) / 'tasks' / args.instance_id
-    repo = task / 'repo'
+    repo = Path(args.repo) if args.repo else task / 'repo'
     if not repo.is_dir():
         raise SystemExit(f'Run setup.py first: {repo}')
 
