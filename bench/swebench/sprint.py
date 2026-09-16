@@ -184,7 +184,11 @@ def sprint(args):
         git(workspace, 'add', '-A')
         tree = git(workspace, 'write-tree').stdout.strip()
         if tree == git(repo_dir, 'rev-parse', f'{start_head}^{{tree}}').stdout.strip():
-            carry_commit = start_head                  # nothing new: keep the carried state
+            # Nothing new. If a carry was already applied this instance, its commit is the
+            # carrier (its parent is this base, so the next cherry-pick merges correctly).
+            # If there was no carry, there is nothing to carry and the base commit must not be
+            # passed on: it is upstream history, and cherry-picking it fabricates a conflict.
+            carry_commit = None if start_head == base else start_head
         else:
             carry_commit = git(workspace, '-c', 'user.email=sprint@example.invalid',
                                '-c', 'user.name=Sprint', 'commit-tree', tree, '-p', base,
