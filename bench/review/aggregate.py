@@ -20,6 +20,10 @@ def arm(case, mode):
         return None
     report = json.loads(path.read_text())
     agents = report.get('agents') or {}
+    # An arm where any agent failed to even build its contract never ran. Counting its empty
+    # findings file as "stayed quiet" is how a broken run reads as a clean control.
+    if any(str(r.get('status', '')).endswith('error') for r in agents.values()):
+        return None
     hits = [n for n, r in agents.items() if (r.get('score') or (False,))[0]]
     reported = len(report.get('merged') or {})
     return {'calls': (report.get('cost') or {}).get('calls', 0),

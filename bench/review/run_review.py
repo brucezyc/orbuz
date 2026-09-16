@@ -84,15 +84,25 @@ def personas_of(repo, only=None):
     return chosen
 
 
-def review_tree(case_dir, instance_repo, patch_text):
-    """A git repo holding base + the submitted patch: the reviewers read this, never write it."""
-    tree = case_dir / 'review-tree'
+def review_tree(case_dir, instance_repo, patch_text, mode):
+    """A git repo holding base + the submitted patch, one per arm.
+
+    One tree per arm: two arms sharing a tree means two `git apply` runs and two commits racing
+    for the same index, which silently turns a comparison into a set of contract errors. A tree
+    left behind by an interrupted run is rebuilt rather than trusted.
+    """
+    tree = case_dir / f'review-tree-{mode}'
     if tree.exists():
-        return tree
+        head = subprocess.run(['git', '-C', str(tree), 'log', '-1', '--format=%s'],
+                              capture_output=True, text=True).stdout.strip()
+        dirty = subprocess.run(['git', '-C', str(tree), 'status', '--porcelain'],
+                              capture_output=True, text=True).stdout.strip()
+        if head == 'submitted patch' and not dirty:
+            return tree
+        shutil.rmtree(tree)
     shutil.copytree(instance_repo, tree, symlinks=True)
     subprocess.run(['git', '-C', str(tree), 'checkout', '-q', '--', '.'], check=True)
-    patch = case_dir / 'candidate.patch'
-    subprocess.run(['git', '-C', str(tree), 'apply', str(patch)], check=True)
+    subprocess.run(['git', '-C', str(tree), 'apply', str(case_dir / 'candidate.patch')], check=True)
     subprocess.run(['git', '-C', str(tree), '-c', 'user.email=review@example.invalid',
                     '-c', 'user.name=Review', 'commit', '-qam', 'submitted patch'], check=True)
     return tree
@@ -150,9 +160,11 @@ def score(case_dir, findings_path):
 
 def run_case(case_dir, state_dir, model_name, base_url, env_file, selected, max_calls):
     meta = json.loads((case_dir / 'meta.json').read_text())
+    mode = 'baseline' if len(selected) == 1 and selected[0]['name'].startswith('generalist') \
+        else 'fanout'
     instance_repo = Path('/root/bench/tasks') / meta['instance'] / 'repo'
     goal = (case_dir / 'goal.md').read_text()
-    tree = review_tree(case_dir, instance_repo, (case_dir / 'candidate.patch').read_text())
+    tree = review_tree(case_dir, instance_repo, (case_dir / 'candidate.patch').read_text(), mode)
     runtime = Runtime(state_dir)
     model = ChatModel(model_name, base_url, 'ORBUZ_KEY')
     results, findings_by_persona = {}, {}
@@ -200,8 +212,6 @@ def run_case(case_dir, state_dir, model_name, base_url, env_file, selected, max_
               'hits': [n for n, r in results.items() if (r.get('score') or (False,))[0]]}
     # One file per configuration: the fan-out report and the baseline report must both survive
     # the comparison, and a shared filename silently loses whichever ran first.
-    mode = 'baseline' if len(selected) == 1 and selected[0]['name'].startswith('generalist') \
-        else 'fanout'
     (case_dir / f'review-{mode}.json').write_text(json.dumps(report, indent=2))
     print(json.dumps({'case': case_dir.name, 'mode': mode, 'merged_findings': len(merged),
                       'merged_hit': merged_score[0], 'cost': report['cost'],
@@ -249,7 +259,7 @@ def main():
         case_dir = Path(args.case_dir)
         meta = json.loads((case_dir / 'meta.json').read_text())
         instance_repo = Path('/root/bench/tasks') / meta['instance'] / 'repo'
-        tree = review_tree(case_dir, instance_repo, (case_dir / 'candidate.patch').read_text())
+        tree = review_tree(case_dir, instance_repo, (case_dir / 'candidate.patch').read_text(), 'fanout')
         goal = (case_dir / 'goal.md').read_text()
         runtime = Runtime(args.state_dir)
         for persona in available:
