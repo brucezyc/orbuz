@@ -74,15 +74,9 @@ def sprint(args):
     sprint_dir.mkdir(parents=True, exist_ok=True)
     selected = candidates(args.cache, args.repo, args.instances, args.window)
     if not repo_dir.is_dir():
-        # Any prepared clone of this repository can seed the sprint repository; which
-        # instances are prepared is an environment fact, not a property of the sprint.
-        source = next((Path(args.root) / 'tasks' / row['instance_id'] / 'repo'
-                       for row in selected
-                       if (Path(args.root) / 'tasks' / row['instance_id'] / 'repo').is_dir()), None)
-        if source is None:
-            raise SystemExit('Run setup.py for a sprinted instance first, e.g. '
-                             + selected[0]['instance_id'])
-        git(args.root, 'clone', '-q', str(source), str(repo_dir))
+        # Seed from upstream, not from a per-instance clone: those carry only the single
+        # commit their instance needs, so a sprint could not reach the other bases.
+        git(Path(args.root), 'clone', '-q', f'https://github.com/{args.repo}.git', str(repo_dir))
         git(repo_dir, 'config', 'user.email', 'sprint@example.invalid')
         git(repo_dir, 'config', 'user.name', 'Sprint')
     records, carry_commit = [], None
@@ -100,6 +94,9 @@ def sprint(args):
     for index, row in enumerate(selected, 1):
         base = row['base_commit']
         record = {'instance': row['instance_id'], 'base_commit': base[:10], 'index': index}
+        if git(repo_dir, 'cat-file', '-e', f'{base}^{{commit}}', check=False).returncode:
+            # A base can be outside whatever the repository already has; upstream serves it.
+            git(repo_dir, 'fetch', '-q', 'origin', base)
         git(repo_dir, 'checkout', '-q', '--detach', base)
         git(repo_dir, 'reset', '-q', '--hard', base)
         if carry_commit:
