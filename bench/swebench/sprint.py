@@ -72,16 +72,19 @@ def sprint(args):
     sprint_dir = Path(args.root) / 'sprints' / f"{Path(args.repo).name}-{args.stamp}"
     repo_dir = sprint_dir / 'repo'
     sprint_dir.mkdir(parents=True, exist_ok=True)
+    selected = candidates(args.cache, args.repo, args.instances, args.window)
     if not repo_dir.is_dir():
-        first_row = candidates(args.cache, args.repo, 1, args.window)[0]
-        first = Path(args.root) / 'tasks' / first_row['instance_id'] / 'repo'
-        if not first.is_dir():
-            raise SystemExit(f'Run setup.py for the first instance first: {first}')
-        git(args.root, 'clone', '-q', str(first), str(repo_dir))
+        # Any prepared clone of this repository can seed the sprint repository; which
+        # instances are prepared is an environment fact, not a property of the sprint.
+        source = next((Path(args.root) / 'tasks' / row['instance_id'] / 'repo'
+                       for row in selected
+                       if (Path(args.root) / 'tasks' / row['instance_id'] / 'repo').is_dir()), None)
+        if source is None:
+            raise SystemExit('Run setup.py for a sprinted instance first, e.g. '
+                             + selected[0]['instance_id'])
+        git(args.root, 'clone', '-q', str(source), str(repo_dir))
         git(repo_dir, 'config', 'user.email', 'sprint@example.invalid')
         git(repo_dir, 'config', 'user.name', 'Sprint')
-
-    selected = candidates(args.cache, args.repo, args.instances, args.window)
     records, carry_commit = [], None
     for index, row in enumerate(selected, 1):
         base = row['base_commit']
