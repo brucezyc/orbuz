@@ -9,7 +9,9 @@ from pathlib import Path
 
 import pytest
 
+from orbuz.runtime import contract as contract_mod
 from orbuz.runtime import engine as engine_mod
+from orbuz.runtime import tools
 from orbuz.runtime.engine import Runtime
 
 REPO_ROOT = str(Path(__file__).resolve().parents[1])
@@ -77,6 +79,41 @@ CHECK_ALL = ('assert answer(1) == 42\nassert answer(0) == 0\n'
 
 
 # ---------- held-out acceptance ----------
+
+def test_restore_file_undoes_damage_and_removes_a_created_file(project):
+    """The tool a live run needed after writing a placeholder over a real module."""
+    spec = contract_mod.validate(contract(project, writable=['answer.py', 'extra.py']))
+    original = (project / 'answer.py').read_text()
+    log = project / 'run.log'
+
+    def call(name, args):
+        return tools.dispatch(name, args, project, spec, log, lambda: False, 5)
+
+    call('write_file', {'path': 'answer.py', 'content': 'PLACEHOLDER'})
+    assert call('restore_file', {'path': 'answer.py'})['restored'] == 'answer.py'
+    assert (project / 'answer.py').read_text() == original
+
+    call('write_file', {'path': 'extra.py', 'content': 'invented'})
+    assert call('restore_file', {'path': 'extra.py'})['removed'] == 'extra.py'
+    assert not (project / 'extra.py').exists()          # undoing a creation removes it
+
+    with pytest.raises(ValueError, match='writable scope'):
+        call('restore_file', {'path': 'check.py'})
+
+
+def test_model_recovers_from_its_own_damage_within_one_attempt(project, tmp_path):
+    rt = Runtime(tmp_path / 'state')
+    task = rt.create(contract(project))
+    model = Scripted([('write_file', {'path': 'answer.py', 'content': 'PLACEHOLDER'}),
+                      ('restore_file', {'path': 'answer.py'}),
+                      ('write_file', {'path': 'answer.py', 'content': GOOD}),
+                      ('submit', {})])
+    result = rt.run(task, model)
+    assert result['status'] == 'accepted'
+    assert (Path(result['workspace']) / 'answer.py').read_text() == GOOD
+    names = [step['name'] for step in rt.journal.steps(task)]
+    assert sum(name.endswith('.restore_file') for name in names) == 1
+
 
 def test_heldout_catches_a_visible_pass(project, tmp_path):
     spec = contract(project, heldout=['/usr/bin/python3', '-B', '/heldout/check_all.py'],

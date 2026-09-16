@@ -1,6 +1,7 @@
 """Narrow source tools. Command execution only sees read-only source."""
+import subprocess
 from pathlib import Path
-from orbuz.runtime.contract import source_path, relative, git
+from orbuz.runtime.contract import source_path, relative, git, git_paths
 from orbuz.runtime.sandbox import execute
 
 
@@ -19,7 +20,9 @@ TOOLS = [
            {'path': TEXT, 'offset': {'type': 'integer'}, 'limit': {'type': 'integer'}}, ['path']),
     schema('write_file', 'Replace one explicitly writable source file; protected paths are denied.',
            {'path': TEXT, 'content': TEXT}, ['path', 'content']),
-    schema('command', 'Execute argv in a networkless sandbox. Source is read-only; /tmp is scratch. Use /usr/bin/python3. No host paths or credentials.',
+    schema('restore_file', 'Restore one writable file to its base revision content; undoes your own edits to it. A file you created is removed. Protected paths are denied.',
+           {'path': TEXT}, ['path']),
+    schema('command', 'Execute argv in a networkless sandbox. Source is read-only, so a command can never modify source files - use write_file for that; /tmp is scratch. Use /usr/bin/python3. No host paths or credentials.', 
            {'argv': {'type': 'array', 'items': TEXT}}, ['argv']),
     schema('submit', 'Submit candidate to the fixed runtime acceptance check. Not a success claim.', {}, []),
     schema('blocked', 'Stop and explain a missing prerequisite; never fabricate success.', {'reason': TEXT}, ['reason']),
@@ -62,6 +65,24 @@ def dispatch(name, args, workspace, spec, log, cancel, remaining):
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(content)
         return {'written': path, 'bytes': p.stat().st_size}
+    if name == 'restore_file':
+        path = relative(args['path'])
+        if path not in spec['writable']:
+            raise ValueError('File is outside writable scope')
+        target = source_path(root, path)
+        if path not in git_paths(root, 'ls-tree', '-r', '--name-only', '-z', spec['base_revision']):
+            # Not tracked at the base revision, so the candidate created it: undoing the
+            # candidate's work means removing it, not checking it out.
+            if target.is_file():
+                target.unlink()
+                return {'removed': path}
+            raise ValueError('Nothing to restore at this path')
+        try:
+            git(root, 'checkout', spec['base_revision'], '--', path)
+        except subprocess.CalledProcessError as exc:
+            raise ValueError('Could not restore from the base revision: '
+                             + (exc.stderr or b'').decode(errors='replace').strip()[:200])
+        return {'restored': path, 'bytes': target.stat().st_size}
     if name == 'command':
         argv = args['argv']
         if not isinstance(argv, list) or not argv or any(not isinstance(a, str) or '\x00' in a for a in argv):
