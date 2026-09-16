@@ -97,7 +97,7 @@ def contract_for(case_dir, goal, tree, persona, max_calls):
                         '/heldout/ground_truth.json'],
             'heldout_assets': [str(case_dir / 'hidden')],
             'max_calls': max_calls, 'max_output_tokens': 4096, 'timeout': 300,
-            'max_seconds': 1200, 'limits': {'max_steps': 8, 'keep_recent': 10, 'pin_first': 2}}
+            'max_seconds': 2400, 'limits': {'max_steps': 40, 'keep_recent': 10, 'pin_first': 2}}
 
 
 def merge(findings_by_persona, tolerance=3):
