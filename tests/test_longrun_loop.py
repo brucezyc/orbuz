@@ -101,6 +101,31 @@ def test_restore_file_undoes_damage_and_removes_a_created_file(project):
         call('restore_file', {'path': 'check.py'})
 
 
+def test_a_long_read_without_edits_gets_told_what_the_loop_needs(project, tmp_path):
+    """A live sprint burned four budgets on reading and never produced a candidate."""
+    rt = Runtime(tmp_path / 'state')
+    task = rt.create(contract(project, max_calls=12))
+    # Varied reads: repeating one identical call is a *stall* and stops the run by design.
+    model = Scripted([('read_file', {'path': 'answer.py', 'offset': index * 4}) for index in range(5)]
+                     + [('write_file', {'path': 'answer.py', 'content': GOOD}), ('submit', {})])
+    result = rt.run(task, model)
+    assert result['status'] == 'accepted'
+    nudged = [m for m in model.seen[-3:] if 'changed nothing' in json.dumps(m)]
+    assert nudged, 'the situation note never said the loop needs an edit'
+    assert 'hidden suite does' in json.dumps(nudged[0])
+
+
+def test_an_edit_silences_the_nudge(project, tmp_path):
+    rt = Runtime(tmp_path / 'state')
+    task = rt.create(contract(project, max_calls=12))
+    model = Scripted([('write_file', {'path': 'answer.py', 'content': 'def answer(n=1):\n    return 0\n'}),
+                      ('read_file', {'path': 'answer.py'})] * 3
+                     + [('write_file', {'path': 'answer.py', 'content': GOOD}), ('submit', {})])
+    result = rt.run(task, model)
+    assert result['status'] == 'accepted'
+    assert 'changed nothing' not in json.dumps(model.seen[-1])
+
+
 def test_model_recovers_from_its_own_damage_within_one_attempt(project, tmp_path):
     rt = Runtime(tmp_path / 'state')
     task = rt.create(contract(project))

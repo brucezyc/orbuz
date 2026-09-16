@@ -52,6 +52,8 @@ MODEL_RETRIES = 3
 RETRY_BACKOFF = 1.0
 # A response cut off by the output limit executed no actions, so asking again is safe. The
 # model usually tried to emit one huge tool call; telling it to split the work is the fix.
+# Steps without any edit before the situation note tells the model what the loop needs.
+NO_EDIT_NUDGE_AFTER = 4
 TRUNCATION_RETRIES = 2
 TRUNCATION_NUDGE = ('Your previous response was cut off by the output limit, so none of it ran. '
                     'Emit smaller steps: fewer or shorter lines per tool call.')
@@ -79,7 +81,11 @@ SYSTEM_PROMPT = (
     'damage a writable file, restore_file returns it to the base revision. '
     'Use reads to investigate before edits. Submit invokes immutable runtime acceptance; '
     'never claim success from prose. Report blocked if requirements cannot be met. '
-    'Do not weaken or bypass tests. Repository facts can be investigated with list_files/read_file/command.')
+    'The visible acceptance passes before you start and does not test the reported issue - the '
+    'hidden suite does - so do not expect it to guide you: read what you need, make the smallest '
+    'change that addresses the issue, then submit. A rejected candidate is information; a run that '
+    'ends without one is not. Do not weaken or bypass tests. Repository facts can be investigated '
+    'with list_files/read_file/command/restore_file.')
 
 
 class Runtime:
@@ -631,10 +637,22 @@ class Runtime:
                                ('exit_code', 'revision', 'log_path', 'output')}
                   if a.get('evidence') else None}
                  for a in task['attempts'][:-1][-8:]]
+        steps = self.journal.steps(task['id'])
+        edits = sum(1 for step in steps if step['name'].endswith('.write_file'))
+        tool_steps = sum(1 for step in steps if step['name'].startswith('tool.'))
         payload = {'remaining_calls': spec['max_calls'] - task['calls'],
                    'steps_this_call': (spec.get('limits') or {}).get('max_steps'),
+                   'edits_made': edits,
                    'journal': self.journal.resume_plan(task['id']),
                    'prior_attempts': prior}
+        if not edits and tool_steps >= NO_EDIT_NUDGE_AFTER:
+            # Measured: a model can spend an entire budget reading. Nothing in the contract is
+            # missing at this point, so say what the loop needs instead of hoping.
+            payload['next'] = ('You have changed nothing after ' + str(tool_steps) + ' steps. The '
+                               'visible acceptance is green before you start and does not test the '
+                               'reported issue; the hidden suite does. Make the smallest change you '
+                               'believe fixes it, run the visible suite, then submit. A rejected '
+                               'candidate is information; no candidate is a wasted run.')
         return {'role': 'user', 'content': 'Situation: ' + json.dumps(payload, ensure_ascii=False),
                 pinning.PRIVATE_KEY: {'situation': 'longrun.situation.v1'}}
 
