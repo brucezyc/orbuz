@@ -99,27 +99,42 @@ def sprint(args):
             git(repo_dir, 'fetch', '-q', 'origin', base)
         git(repo_dir, 'checkout', '-q', '--detach', base)
         git(repo_dir, 'reset', '-q', '--hard', base)
+        start_red = False
         if carry_commit:
             picked = git(repo_dir, 'cherry-pick', '-x', carry_commit, check=False)
             if picked.returncode:
-                git(repo_dir, 'cherry-pick', '--abort', check=False)
-                record['carry'] = 'conflict'
-                lines = [line for line in picked.stderr.strip().splitlines() if line.strip()]
-                record['detail'] = lines[-1][:200] if lines else ''
-                records.append(record)
-                close()
-                break
-            record['carry'] = 'carried'
+                # Do not abort. A conflict between the agent's own work and the project's own
+                # history is the long-horizon situation itself; aborting would erase the very
+                # thing a sprint exists to produce. Hand the conflicted tree to the next task
+                # and let the verdict say whether the agent can clean up its own mess.
+                record['conflict_paths'] = git(repo_dir, 'diff', '--name-only',
+                                               '--diff-filter=U').stdout.split()
+                record['detail'] = next((line for line in picked.stderr.splitlines()
+                                         if line.startswith('CONFLICT')), '')[:200]
+                git(repo_dir, 'add', '-A')
+                handed = git(repo_dir, '-c', 'user.email=sprint@example.invalid',
+                             '-c', 'user.name=Sprint', 'commit', '-qm',
+                             f'carry with unresolved conflict from {row["instance_id"]}',
+                             check=False)
+                record['carry'] = ('conflict_handed_over' if not handed.returncode
+                                   else 'conflict_left_in_worktree')
+                start_red = True
+            else:
+                record['carry'] = 'carried'
         else:
             record['carry'] = 'first'
 
         contract = sprint_dir / f'{row["instance_id"]}.contract.json'
-        built = subprocess.run(
-            [sys.executable, str(HERE / 'make_contract.py'), row['instance_id'],
-             '--cache', args.cache, '--root', args.root, '--repo', str(repo_dir),
-             '--out', str(contract), '--max-calls', str(args.max_calls),
-             '--max-seconds', str(args.max_seconds), '--steps-per-run', str(args.steps_per_run)],
-            capture_output=True, text=True)
+        build = [sys.executable, str(HERE / 'make_contract.py'), row['instance_id'],
+                 '--cache', args.cache, '--root', args.root, '--repo', str(repo_dir),
+                 '--out', str(contract), '--max-calls', str(args.max_calls),
+                 '--max-seconds', str(args.max_seconds),
+                 '--steps-per-run', str(args.steps_per_run)]
+        if start_red:
+            # A carried tree that starts red is the agent's own mess, not an unusable instance:
+            # skip the environment gate and let it try.
+            build.append('--no-preflight')
+        built = subprocess.run(build, capture_output=True, text=True)
         if built.returncode:
             # Distinguish "this instance cannot run in this environment" from "the work
             # carried from earlier tasks broke this base": the first is an environment fact,
@@ -140,11 +155,17 @@ def sprint(args):
                 record['detail'] = (built.stderr.strip() or built.stdout.strip())[-250:]
                 records.append(record)
                 continue
-            record['status'] = 'carry_broke_this_base'
-            record['detail'] = 'carried work fails preflight, the clean base passes'
-            records.append(record)
+            # The carry is what broke this base: that is the thing under test, not a reason to
+            # stop. Rebuild without the gate and run the task on the broken base.
+            record['carried_preflight'] = 'failed'
+            rebuilt = subprocess.run([*build, '--no-preflight'], capture_output=True, text=True)
+            if rebuilt.returncode:
+                record['status'] = 'contract_failed'
+                record['detail'] = rebuilt.stderr.strip()[-250:]
+                records.append(record)
+                continue
+            built = rebuilt
             close()
-            break
         record['contract'] = last_json(built.stdout) or {}
 
         start_head = git(repo_dir, 'rev-parse', 'HEAD').stdout.strip()   # base, or base + carry

@@ -99,6 +99,9 @@ def main():
                                        "per-instance clone; a sprint carries work forward")
     parser.add_argument('--max-calls', type=int, default=40)
     parser.add_argument('--max-seconds', type=float, default=1500)
+    parser.add_argument('--no-preflight', action='store_true',
+                        help='skip the environment gate: a carried base is allowed to start red '
+                             'because the agent under test is the one who has to fix it')
     parser.add_argument('--steps-per-run', type=int, default=6)
     args = parser.parse_args()
 
@@ -144,8 +147,8 @@ def main():
                          f'{MAX_WRITABLE}; narrow the package scope explicitly rather than '
                          'letting the list be truncated')
 
-    result, log_path = preflight(repo, visible)
-    if result.get('exit_code') != 0:
+    result, log_path = ((None, None) if args.no_preflight else preflight(repo, visible))
+    if result and result.get('exit_code') != 0:
         lines = [line for line in (result.get('output') or '').splitlines() if line.strip()]
         raise SystemExit('Unusable instance: the visible suite does not pass offline at the base '
                          'commit (exit ' + str(result.get('exit_code')) + '). Last output: '
@@ -175,7 +178,7 @@ def main():
     out = Path(args.out) if args.out else task / 'contract.json'
     out.write_text(json.dumps(contract, indent=2))
     print(json.dumps({'instance': row['instance_id'],
-                      'preflight_visible_exit': result.get('exit_code'),
+                      'preflight_visible_exit': (result or {}).get('exit_code'),
                       'contract': str(out),
                       'hidden_node_ids': len(hidden),
                       'hidden_patch': str(patch_file),
