@@ -215,7 +215,7 @@ def sprint(args):
                                '-c', 'user.name=Sprint', 'commit-tree', tree, '-p', base,
                                '-m', f'carry {row["instance_id"]}: {final.get("status")}'
                                ).stdout.strip()
-        record['carry_commit'] = carry_commit[:10]
+        record['carry_commit'] = carry_commit[:10] if carry_commit else None
         record['carry_parent'] = base[:10]
         records.append(record)
 
