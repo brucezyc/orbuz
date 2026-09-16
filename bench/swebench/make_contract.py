@@ -70,6 +70,25 @@ def hidden_tree(repo, test_patch_text, destination):
     return destination
 
 
+def preflight(repo, nodes, orbuz='/root/orbuz', timeout=300):
+    """Refuse to build a task whose visible suite cannot pass offline at the base commit.
+
+    Two ways an instance is unusable here: its tests need a network the sandbox does not have,
+    or its code predates the interpreter we run (an old sympy importing collections.Mapping
+    fails on python 3.11). Neither is visible until the tests actually run, and finding out
+    after a model has spent a budget is waste.
+    """
+    import sys
+    sys.path.insert(0, orbuz)
+    from orbuz.runtime.sandbox import execute
+    logs = Path(repo).parent / 'logs'
+    logs.mkdir(parents=True, exist_ok=True)
+    result = execute(Path(repo), ['/usr/bin/python3', '-B', '-m', 'pytest', '-q',
+                                  '-p', 'no:cacheprovider', *nodes],
+                     logs / 'preflight.log', timeout=timeout)
+    return result, logs / 'preflight.log'
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('instance_id')
@@ -123,6 +142,14 @@ def main():
                          f'{MAX_WRITABLE}; narrow the package scope explicitly rather than '
                          'letting the list be truncated')
 
+    result, log_path = preflight(repo, visible)
+    if result.get('exit_code') != 0:
+        lines = [line for line in (result.get('output') or '').splitlines() if line.strip()]
+        raise SystemExit('Unusable instance: the visible suite does not pass offline at the base '
+                         'commit (exit ' + str(result.get('exit_code')) + '). Last output: '
+                         + (lines[-1][:300] if lines else '') + '\nLog: ' + str(log_path)
+                         + '\nDo not spend a model budget on it.')
+
     hidden_dir = task / 'hidden'
     hidden_dir.mkdir(exist_ok=True)
     patch_file = hidden_dir / 'test_patch.diff'
@@ -146,6 +173,7 @@ def main():
     out = Path(args.out) if args.out else task / 'contract.json'
     out.write_text(json.dumps(contract, indent=2))
     print(json.dumps({'instance': row['instance_id'],
+                      'preflight_visible_exit': result.get('exit_code'),
                       'contract': str(out),
                       'hidden_node_ids': len(hidden),
                       'hidden_patch': str(patch_file),
