@@ -33,13 +33,20 @@ def git(root, *args, check=True):
     return done
 
 
-def candidates(cache, repo, limit):
-    """Instances of one repository, oldest first, so a sprint walks the project's timeline."""
+def candidates(cache, repo, limit, window='newest'):
+    """Pick a window of one repository's instances and walk it forward in time.
+
+    A sprint always runs oldest-to-newest, but the window matters: this environment runs
+    python 3.11, so a repository's earliest instances (2016-2017 sympy) are not usable at all -
+    their code predates the interpreter. ``newest`` takes the most recent instances and still
+    walks them in ascending order, which is the window a sprint can actually run in.
+    """
     rows = [row for row in json.loads(Path(cache).read_text()) if row['repo'] == repo]
     if not rows:
         raise SystemExit(f'No instances for {repo} in {cache}')
     rows.sort(key=lambda row: row['created_at'])
-    return rows[:limit]
+    chosen = rows[:limit] if window == 'oldest' else rows[-limit:]
+    return chosen
 
 
 def last_json(text):
@@ -66,14 +73,15 @@ def sprint(args):
     repo_dir = sprint_dir / 'repo'
     sprint_dir.mkdir(parents=True, exist_ok=True)
     if not repo_dir.is_dir():
-        first = Path(args.root) / 'tasks' / candidates(args.cache, args.repo, 1)[0]['instance_id'] / 'repo'
+        first_row = candidates(args.cache, args.repo, 1, args.window)[0]
+        first = Path(args.root) / 'tasks' / first_row['instance_id'] / 'repo'
         if not first.is_dir():
             raise SystemExit(f'Run setup.py for the first instance first: {first}')
         git(args.root, 'clone', '-q', str(first), str(repo_dir))
         git(repo_dir, 'config', 'user.email', 'sprint@example.invalid')
         git(repo_dir, 'config', 'user.name', 'Sprint')
 
-    selected = candidates(args.cache, args.repo, args.instances)
+    selected = candidates(args.cache, args.repo, args.instances, args.window)
     records, carry_commit = [], None
     for index, row in enumerate(selected, 1):
         base = row['base_commit']
@@ -171,6 +179,8 @@ def main():
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument('--repo', default='sympy/sympy')
     parser.add_argument('--instances', type=int, default=3)
+    parser.add_argument('--window', choices=('newest', 'oldest'), default='newest',
+                        help='which slice of the timeline to sprint over (walked oldest-first)')
     parser.add_argument('--root', default='/root/bench')
     parser.add_argument('--cache', default='/root/bench/data/verified.json')
     parser.add_argument('--state-dir', default='/root/orbuz-state')
@@ -187,7 +197,7 @@ def main():
     args = parser.parse_args()
 
     if args.list:
-        for row in candidates(args.cache, args.repo, args.instances):
+        for row in candidates(args.cache, args.repo, args.instances, args.window):
             print(json.dumps({'instance': row['instance_id'], 'created_at': row['created_at'],
                               'base_commit': row['base_commit'][:10],
                               'difficulty': row.get('difficulty'),
