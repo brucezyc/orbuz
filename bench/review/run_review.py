@@ -108,7 +108,7 @@ def review_tree(case_dir, instance_repo, patch_text, mode):
     return tree
 
 
-def contract_for(case_dir, goal, tree, persona, max_calls):
+def contract_for(case_dir, goal, tree, persona, max_calls, max_steps=40):
     name = f"findings-{persona['name']}.json"
     text = goal + ('\n\n## Your reviewer role: ' + persona['name'] + '\n'
                    + persona['summary'] + '\n' + '\n'.join('- ' + p for p in persona['principles'])
@@ -121,7 +121,8 @@ def contract_for(case_dir, goal, tree, persona, max_calls):
                         '/heldout/ground_truth.json'],
             'heldout_assets': [str(case_dir / 'hidden')],
             'max_calls': max_calls, 'max_output_tokens': 4096, 'timeout': 300,
-            'max_seconds': 1800, 'limits': {'max_steps': 40, 'keep_recent': 10, 'pin_first': 2}}
+            'max_seconds': 1800, 'limits': {'max_steps': max_steps, 'keep_recent': 10,
+                                            'pin_first': 2}}
 
 
 def merge(findings_by_persona, tolerance=3):
@@ -158,7 +159,8 @@ def score(case_dir, findings_path):
     return done.returncode == 0, detail
 
 
-def run_case(case_dir, state_dir, model_name, base_url, env_file, selected, max_calls):
+def run_case(case_dir, state_dir, model_name, base_url, env_file, selected, max_calls,
+             max_steps=40, tag=''):
     meta = json.loads((case_dir / 'meta.json').read_text())
     mode = 'baseline' if len(selected) == 1 and selected[0]['name'].startswith('generalist') \
         else 'fanout'
@@ -171,7 +173,7 @@ def run_case(case_dir, state_dir, model_name, base_url, env_file, selected, max_
     try:
         for persona in selected:
             try:
-                spec = runtime.create(contract_for(case_dir, goal, tree, persona, max_calls))
+                spec = runtime.create(contract_for(case_dir, goal, tree, persona, max_calls, max_steps))
             except Exception as exc:
                 # One unusable persona must not cost the other agents their results.
                 results[persona['name']] = {'status': 'contract_error',
@@ -212,7 +214,7 @@ def run_case(case_dir, state_dir, model_name, base_url, env_file, selected, max_
               'hits': [n for n, r in results.items() if (r.get('score') or (False,))[0]]}
     # One file per configuration: the fan-out report and the baseline report must both survive
     # the comparison, and a shared filename silently loses whichever ran first.
-    (case_dir / f'review-{mode}.json').write_text(json.dumps(report, indent=2))
+    (case_dir / f'review-{mode}{tag}.json').write_text(json.dumps(report, indent=2))
     print(json.dumps({'case': case_dir.name, 'mode': mode, 'merged_findings': len(merged),
                       'merged_hit': merged_score[0], 'cost': report['cost'],
                       'agents_hit': [n for n, r in results.items() if (r.get('score') or (False,))[0]]}))
@@ -234,6 +236,10 @@ def main():
     parser.add_argument('--list-personas', action='store_true')
     parser.add_argument('--dry-run', action='store_true',
                         help='build every contract and stop: catches config errors before spend')
+    parser.add_argument('--max-steps', type=int, default=40,
+                        help='tool steps per run: a budget arm cut short here is not a fair '
+                             'comparison, whatever its call budget says')
+    parser.add_argument('--tag', default='', help='suffix for the report filename')
     args = parser.parse_args()
 
     only = None if args.personas == 'all' else set(args.personas.split(','))
@@ -271,7 +277,7 @@ def main():
                               'max_calls': spec['max_calls'], 'max_seconds': spec['max_seconds']}))
         return
     run_case(Path(args.case_dir), args.state_dir, args.model, args.base_url, args.env_file,
-             available, args.max_calls)
+             available, args.max_calls, args.max_steps, args.tag)
 
 
 if __name__ == '__main__':
