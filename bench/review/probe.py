@@ -71,6 +71,13 @@ def main():
                           'fanout': next((a for k, a in c['arms'].items() if k.startswith('fanout')), None),
                           'baseline': next((a for k, a in c['arms'].items() if k.startswith('baseline')), None)}
                          for c in cases if not c['control'] and c['case'] in both_arms],
+        'defect_all_arms': [{'case': c['case'], 'subtle': c['subtle'],
+                             'arms': {k: {'calls': a['calls'], 'tokens': a['tokens'],
+                                          'wall_s': a['wall_s'], 'concurrency': a['concurrency'],
+                                          'hit': a['hit'], 'findings': a['findings'],
+                                          'hitting_agents': a['hitting_agents']}
+                                      for k, a in c['arms'].items()}}
+                            for c in cases if not c['control']],
         'defect_incomplete': [c['case'] for c in cases if not c['control'] and c['case'] not in both_arms],
         'invalid_arms': [f"{c['case']}:{k}" for c in cases for k, a in c['arms'].items() if a.get('invalid')],
     }, indent=1))
