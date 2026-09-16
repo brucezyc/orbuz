@@ -120,7 +120,7 @@ def contract_for(case_dir, goal, tree, persona, max_calls, max_steps=40):
             'heldout': ['/usr/bin/python3', '/heldout/score.py', '/workspace/' + name,
                         '/heldout/ground_truth.json'],
             'heldout_assets': [str(case_dir / 'hidden')],
-            'max_calls': max_calls, 'max_output_tokens': 4096, 'timeout': 300,
+            'max_calls': max_calls, 'max_output_tokens': 8192, 'timeout': 300,
             'max_seconds': 1800, 'limits': {'max_steps': max_steps, 'keep_recent': 10,
                                             'pin_first': 2}}
 
