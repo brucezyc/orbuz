@@ -121,8 +121,27 @@ def sprint(args):
              '--max-seconds', str(args.max_seconds), '--steps-per-run', str(args.steps_per_run)],
             capture_output=True, text=True)
         if built.returncode:
-            record['status'] = 'unusable_carry'
-            record['detail'] = (built.stderr.strip() or built.stdout.strip())[:250]
+            # Distinguish "this instance cannot run in this environment" from "the work
+            # carried from earlier tasks broke this base": the first is an environment fact,
+            # the second is the composite-error signal a sprint exists to measure.
+            clean = sprint_dir / f'clean-{index}'
+            git(repo_dir, 'worktree', 'add', '-q', '--detach', str(clean), base)
+            clean_built = subprocess.run(
+                [sys.executable, str(HERE / 'make_contract.py'), row['instance_id'],
+                 '--cache', args.cache, '--root', args.root, '--repo', str(clean),
+                 '--out', str(sprint_dir / f'{row["instance_id"]}.clean.contract.json'),
+                 '--max-calls', str(args.max_calls), '--max-seconds', str(args.max_seconds),
+                 '--steps-per-run', str(args.steps_per_run)],
+                capture_output=True, text=True)
+            if clean_built.returncode:
+                # The instance cannot run here whatever we did; skip it and keep the sprint
+                # alive rather than reporting an environment fact as a sprint outcome.
+                record['status'] = 'unusable_instance'
+                record['detail'] = (built.stderr.strip() or built.stdout.strip())[-250:]
+                records.append(record)
+                continue
+            record['status'] = 'carry_broke_this_base'
+            record['detail'] = 'carried work fails preflight, the clean base passes'
             records.append(record)
             close()
             break
