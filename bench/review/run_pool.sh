@@ -8,7 +8,7 @@ set -u
 cd "$(dirname "$0")/../.."
 ROOT=${1:-/root/bench/review}
 
-for case in $(find "$ROOT" -mindepth 2 -maxdepth 2 -name meta.json -not -path '*_stale*' -printf '%h\n' | sort); do
+for case in $(find "$ROOT" -mindepth 3 -maxdepth 3 -name meta.json -not -path '*_stale*' -printf '%h\n' | sort); do
   [ -f "$case/review-fanout.json" ] && [ -f "$case/review-baseline.json" ] && continue
   echo "=== $(basename "$case") ==="
   python3 bench/review/run_review.py "$case" --personas all --max-calls 10 > "$case/fanout.log" 2>&1 &
