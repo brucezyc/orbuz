@@ -95,7 +95,7 @@ def contract_for(case_dir, goal, tree, persona, max_calls):
             'acceptance': ['/usr/bin/python3', '-B', '-c', SHAPE_CHECK.format(name=name)],
             'heldout': ['/usr/bin/python3', '/heldout/score.py', '/workspace/' + name,
                         '/heldout/ground_truth.json'],
-            'heldout_assets': str(case_dir / 'hidden'),
+            'heldout_assets': [str(case_dir / 'hidden')],
             'max_calls': max_calls, 'max_output_tokens': 4096, 'timeout': 300,
             'max_seconds': 1200, 'limits': {'max_steps': 8, 'keep_recent': 10, 'pin_first': 2}}
 
@@ -144,7 +144,15 @@ def run_case(case_dir, state_dir, model_name, base_url, env_file, selected, max_
     results, findings_by_persona = {}, {}
     try:
         for persona in selected:
-            spec = runtime.create(contract_for(case_dir, goal, tree, persona, max_calls))
+            try:
+                spec = runtime.create(contract_for(case_dir, goal, tree, persona, max_calls))
+            except Exception as exc:
+                # One unusable persona must not cost the other agents their results.
+                results[persona['name']] = {'status': 'contract_error',
+                                            'detail': f'{type(exc).__name__}: {exc}'[:200]}
+                print(json.dumps({'case': case_dir.name, 'agent': persona['name'],
+                                  'status': 'contract_error'}), flush=True)
+                continue
             outcome = runtime.run(spec, model)
             findings_path = Path(outcome['workspace']) / f"findings-{persona['name']}.json"
             try:
@@ -173,8 +181,9 @@ def run_case(case_dir, state_dir, model_name, base_url, env_file, selected, max_
     report = {'case': case_dir.name, 'instance': meta['instance'], 'control': meta.get('control', False),
               'agents': results, 'merged': {'findings': len(merged), 'agents': len(selected),
                                             'score': merged_score},
-              'cost': {'calls': sum(r['calls'] or 0 for r in results.values()),
-                       'tokens': sum(r['tokens'] or 0 for r in results.values())}}
+              'cost': {'calls': sum(r.get('calls') or 0 for r in results.values()),
+                       'tokens': sum(r.get('tokens') or 0 for r in results.values())},
+              'hits': [n for n, r in results.items() if (r.get('score') or (False,))[0]]}
     (case_dir / 'review-report.json').write_text(json.dumps(report, indent=2))
     print(json.dumps({'case': case_dir.name, 'merged_findings': len(merged),
                       'merged_hit': merged_score[0], 'cost': report['cost'],
@@ -185,7 +194,7 @@ def run_case(case_dir, state_dir, model_name, base_url, env_file, selected, max_
 def main():
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument('case_dir')
+    parser.add_argument('case_dir', nargs='?')
     parser.add_argument('--repo-for-personas', default='/root/orbuz')
     parser.add_argument('--personas', default='all',
                         help='all (always-on reviewers) or a comma-separated persona list')
