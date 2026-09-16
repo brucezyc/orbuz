@@ -72,7 +72,7 @@ def main():
     rt = Runtime(Path(args.state_dir))
     spec = json.loads(Path(args.contract).read_text())
     task_id = args.task or rt.create(spec)
-    print(json.dumps({'task': task_id, 'goal_chars': len(spec['goal']),
+    print(json.dumps({'model': args.model, 'base_url': args.base_url, 'task': task_id, 'goal_chars': len(spec['goal']),
                       'writable': len(spec['writable']),
                       'visible_nodes': len(spec['acceptance']) - 6,
                       'hidden_nodes': len(spec['heldout']) - 6,
