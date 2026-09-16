@@ -147,6 +147,8 @@ def sprint(args):
             break
         record['contract'] = last_json(built.stdout) or {}
 
+        start_head = git(repo_dir, 'rev-parse', 'HEAD').stdout.strip()   # base, or base + carry
+
         if args.dry_run:
             record['status'] = 'dry_run'
             records.append(record)
@@ -173,17 +175,23 @@ def sprint(args):
             records.append(record)
             close()
             break
+        # Carry a tree, not the workspace's HEAD. Two traps: a task that changed nothing
+        # leaves HEAD at the base commit, and carrying that would replay upstream history into
+        # the next instance; and a commit whose parent is the previous carry makes the wrong
+        # commit the merge base, which silently drops the work carried before it. A commit
+        # whose parent is this instance's own base holds the full cumulative work, and a
+        # cherry-pick of it onto the next base three-way merges against exactly that base.
         git(workspace, 'add', '-A')
-        committed = git(workspace, '-c', 'user.email=sprint@example.invalid',
-                        '-c', 'user.name=Sprint', 'commit', '-qm',
-                        f'sprint {row["instance_id"]}: {final.get("status")}', check=False)
-        if committed.returncode and 'nothing to commit' not in (committed.stdout + committed.stderr):
-            record['carry'] = 'lost: could not commit workspace'
-            records.append(record)
-            close()
-            break
-        carry_commit = git(workspace, 'rev-parse', 'HEAD').stdout.strip()
+        tree = git(workspace, 'write-tree').stdout.strip()
+        if tree == git(repo_dir, 'rev-parse', f'{start_head}^{{tree}}').stdout.strip():
+            carry_commit = start_head                  # nothing new: keep the carried state
+        else:
+            carry_commit = git(workspace, '-c', 'user.email=sprint@example.invalid',
+                               '-c', 'user.name=Sprint', 'commit-tree', tree, '-p', base,
+                               '-m', f'carry {row["instance_id"]}: {final.get("status")}'
+                               ).stdout.strip()
         record['carry_commit'] = carry_commit[:10]
+        record['carry_parent'] = base[:10]
         records.append(record)
 
         report = {'sprint': sprint_dir.name, 'repo': args.repo, 'instances': records,
