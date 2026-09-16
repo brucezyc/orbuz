@@ -33,40 +33,54 @@ SHAPE_CHECK = ("import json;d=json.load(open('{name}'));assert isinstance(d,list
                "be a list';print('shape ok', len(d))")
 
 
-def personas_of(repo, only=None):
-    """The repository's always-on reviewers, in the order its index declares them."""
-    index = yaml.safe_load((Path(repo) / 'agents' / 'index.yaml').read_text())['agents']
-    if only == {'merged'}:
-        # The equal-cost baseline: one agent holding every always-on concern, run with the
-        # budget the whole fan-out gets. Without this, "more agents are better" can be bought
-        # by spending more, and the comparison would say nothing about the shape.
-        always = [e for e in index]
-        principles, constraints = [], []
-        for entry in always:
-            path = Path(repo) / 'agents' / entry['file']
-            if not path.exists():
-                continue
-            definition = yaml.safe_load(path.read_text()) or {}
-            if definition.get('persona_tier') != 'always_on':
-                continue
-            principles += [f"[{entry['name']}] {p}" for p in (definition.get('principles') or [])]
-            constraints += [f"[{entry['name']}] {c}" for c in (definition.get('constraints') or [])]
-        return [{'name': 'generalist-equal-cost',
-                 'summary': f'one reviewer carrying all {len(always)} always-on concerns',
-                 'principles': principles, 'constraints': constraints}]
-    chosen = []
+def definitions(repo):
+    """Load the repository's own agent library: name, tier, archetype, principles."""
+    base = Path(repo) / 'agents'
+    if not (base / 'index.yaml').exists():
+        base = Path(repo) / 'orbuz' / 'agents'
+    index = yaml.safe_load((base / 'index.yaml').read_text())['agents']
+    loaded = []
     for entry in index:
-        path = Path(repo) / 'agents' / entry['file']
+        path = base / entry['file']
         if not path.exists():
             continue
         definition = yaml.safe_load(path.read_text()) or {}
-        if definition.get('persona_tier') != 'always_on':
-            continue
-        if only and entry['name'] not in only:
-            continue
-        chosen.append({'name': entry['name'], 'summary': definition.get('summary', ''),
+        loaded.append({'name': entry['name'], 'summary': definition.get('summary', ''),
+                       'tier': definition.get('persona_tier'),
+                       'archetype': definition.get('archetype'),
                        'principles': definition.get('principles') or [],
                        'constraints': definition.get('constraints') or []})
+    return loaded
+
+
+# The library declares what each persona is for: pick by that declaration, not by name.
+# always_on means the pipeline runs it on every diff, which is the honest default fan-out.
+# Researchers stay out of a code review even when they are always-on.
+SELECTORS = {
+    'all': lambda d: d['archetype'] == 'reviewer' and d['tier'] == 'always_on',
+    'reviewers': lambda d: d['archetype'] == 'reviewer'
+    and d['tier'] in ('always_on', 'cross_cutting'),
+    'always-on': lambda d: d['tier'] == 'always_on',
+}
+
+
+def personas_of(repo, only=None):
+    """The reviewers to run: a selector name, an explicit list, or the equal-cost single agent."""
+    loaded = definitions(repo)
+    if len(only or ()) == 1 and next(iter(only)) in SELECTORS:
+        chosen = [d for d in loaded if SELECTORS[next(iter(only))](d)]
+    elif not only or only == {'merged'}:
+        chosen = [d for d in loaded if SELECTORS['all'](d)]
+    else:
+        chosen = [d for d in loaded if d['name'] in only]
+    if only == {'merged'}:
+        # The equal-cost baseline: one agent holding every principle the fan-out gets, with the
+        # fan-out's whole budget. Without this, "more agents are better" can be bought by
+        # spending more, and the comparison would say nothing about the shape.
+        return [{'name': 'generalist-equal-cost',
+                 'summary': f"one reviewer carrying all {len(chosen)} concerns of the fan-out",
+                 'principles': [f"[{d['name']}] {x}" for d in chosen for x in d['principles']],
+                 'constraints': [f"[{d['name']}] {x}" for d in chosen for x in d['constraints']]}]
     return chosen
 
 
@@ -97,7 +111,7 @@ def contract_for(case_dir, goal, tree, persona, max_calls):
                         '/heldout/ground_truth.json'],
             'heldout_assets': [str(case_dir / 'hidden')],
             'max_calls': max_calls, 'max_output_tokens': 4096, 'timeout': 300,
-            'max_seconds': 2400, 'limits': {'max_steps': 40, 'keep_recent': 10, 'pin_first': 2}}
+            'max_seconds': 1800, 'limits': {'max_steps': 40, 'keep_recent': 10, 'pin_first': 2}}
 
 
 def merge(findings_by_persona, tolerance=3):
@@ -191,7 +205,7 @@ def run_case(case_dir, state_dir, model_name, base_url, env_file, selected, max_
     (case_dir / f'review-{mode}.json').write_text(json.dumps(report, indent=2))
     print(json.dumps({'case': case_dir.name, 'mode': mode, 'merged_findings': len(merged),
                       'merged_hit': merged_score[0], 'cost': report['cost'],
-                      'agents_hit': [n for n, r in results.items() if r['score'][0]]}))
+                      'agents_hit': [n for n, r in results.items() if (r.get('score') or (False,))[0]]}))
     return report
 
 
@@ -208,6 +222,8 @@ def main():
     parser.add_argument('--env-file', default='/root/.orbuz/deepseek.env')
     parser.add_argument('--max-calls', type=int, default=15)
     parser.add_argument('--list-personas', action='store_true')
+    parser.add_argument('--dry-run', action='store_true',
+                        help='build every contract and stop: catches config errors before spend')
     args = parser.parse_args()
 
     only = None if args.personas == 'all' else set(args.personas.split(','))
@@ -228,6 +244,21 @@ def main():
     if not os.environ['ORBUZ_KEY']:
         raise SystemExit('No credential: set --env-file or ORBUZ_KEY')
 
+    if args.dry_run:
+        # Contracts are validated here, in a second, instead of after the first model call.
+        case_dir = Path(args.case_dir)
+        meta = json.loads((case_dir / 'meta.json').read_text())
+        instance_repo = Path('/root/bench/tasks') / meta['instance'] / 'repo'
+        tree = review_tree(case_dir, instance_repo, (case_dir / 'candidate.patch').read_text())
+        goal = (case_dir / 'goal.md').read_text()
+        runtime = Runtime(args.state_dir)
+        for persona in available:
+            spec = runtime.create(contract_for(case_dir, goal, tree, persona, args.max_calls))
+            print(json.dumps({'agent': persona['name'], 'goal_chars': len(spec['goal']),
+                              'writable': spec['writable'], 'heldout': spec['heldout'],
+                              'assets': spec['heldout_assets'], 'max_calls': spec['max_calls'],
+                              'max_seconds': spec['max_seconds'], 'limits': spec['limits']}))
+        return
     run_case(Path(args.case_dir), args.state_dir, args.model, args.base_url, args.env_file,
              available, args.max_calls)
 
