@@ -189,7 +189,8 @@ def run_case(case_dir, state_dir, model_name, base_url, env_file, selected, max_
                 findings = []
             findings_by_persona[persona['name']] = findings if isinstance(findings, list) else []
             results[persona['name']] = {
-                'status': outcome['status'], 'calls': outcome['calls'],
+                'status': outcome['status'], 'error': outcome.get('error'),
+                'calls': outcome['calls'],
                 'journal_steps': outcome.get('journal_steps'),
                 'tokens': (outcome.get('budget') or {}).get('total_tokens'),
                 'findings': len(findings) if isinstance(findings, list) else 0,
