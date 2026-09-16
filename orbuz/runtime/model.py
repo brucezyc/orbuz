@@ -5,13 +5,16 @@ import httpx
 
 
 class ChatModel:
-    def __init__(self, model, base_url, key_env='DEEPSEEK_API_KEY', timeout=30):
+    def __init__(self, model, base_url, key_env='DEEPSEEK_API_KEY', timeout=180):
         key = os.environ.get(key_env)
         if not key:
             raise ValueError('Missing credential environment variable: ' + key_env)
         if not base_url.startswith('https://'):
             raise ValueError('HTTPS model endpoint required')
         self.model = model
+        # A read timeout, per request. It has to outlast the generation of a full-size answer:
+        # at 30s every slow response - not just a broken one - kills the agent, and a retry
+        # budget of three 30s attempts does not survive a provider having a slow minute.
         self.client = httpx.Client(base_url=base_url.rstrip('/') + '/', timeout=timeout,
                                    headers={'Authorization': 'Bearer ' + key},
                                    follow_redirects=False)
