@@ -54,6 +54,8 @@ RETRY_BACKOFF = 1.0
 # model usually tried to emit one huge tool call; telling it to split the work is the fix.
 # Steps without any edit before the situation note tells the model what the loop needs.
 NO_EDIT_NUDGE_AFTER = 4
+# Calls left with no candidate: past this point, landing something beats reading on.
+LOW_BUDGET_CALLS = 3
 TRUNCATION_RETRIES = 2
 TRUNCATION_NUDGE = ('Your previous response was cut off by the output limit, so none of it ran. '
                     'Emit smaller steps: fewer or shorter lines per tool call.')
@@ -645,7 +647,15 @@ class Runtime:
                    'edits_made': edits,
                    'journal': self.journal.resume_plan(task['id']),
                    'prior_attempts': prior}
-        if not edits and tool_steps >= NO_EDIT_NUDGE_AFTER:
+        calls_left = spec['max_calls'] - task['calls']
+        if not edits and calls_left <= LOW_BUDGET_CALLS:
+            # Measured: a model can burn a whole budget reading and end with nothing. Landing a
+            # candidate it is unsure about is strictly better - a rejection carries evidence to
+            # the next attempt, an empty run carries none.
+            payload['deadline'] = ('Only ' + str(max(0, calls_left)) + ' calls left and no candidate.'
+                                   ' Write your best change now and submit: a rejected candidate is'
+                                   ' information, an empty run is not.')
+        elif not edits and tool_steps >= NO_EDIT_NUDGE_AFTER:
             # Measured: a model can spend an entire budget reading. Nothing in the contract is
             # missing at this point, so say what the loop needs instead of hoping.
             payload['next'] = ('You have changed nothing after ' + str(tool_steps) + ' steps. The '

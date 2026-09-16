@@ -115,6 +115,19 @@ def test_a_long_read_without_edits_gets_told_what_the_loop_needs(project, tmp_pa
     assert 'hidden suite does' in json.dumps(nudged[0])
 
 
+def test_running_out_of_budget_without_a_candidate_says_so(project, tmp_path):
+    """Ending a budget empty is the measured failure; the note makes the choice explicit."""
+    rt = Runtime(tmp_path / 'state')
+    task = rt.create(contract(project, max_calls=6))
+    model = Scripted([('read_file', {'path': 'answer.py', 'offset': index * 4}) for index in range(3)]
+                     + [('write_file', {'path': 'answer.py', 'content': GOOD}), ('submit', {})])
+    result = rt.run(task, model)
+    assert result['status'] == 'accepted'
+    seen = json.dumps(model.seen)
+    assert 'calls left and no candidate' in seen
+    assert 'rejected candidate is' in seen
+
+
 def test_an_edit_silences_the_nudge(project, tmp_path):
     rt = Runtime(tmp_path / 'state')
     task = rt.create(contract(project, max_calls=12))
