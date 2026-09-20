@@ -113,6 +113,13 @@ python -m orbuz.runtime --state-dir /absolute/path/outside/project/state cancel 
 python -m orbuz.runtime --state-dir /absolute/path/outside/project/state steps TASK_ID
 python -m orbuz.runtime --state-dir /absolute/path/outside/project/state \
   pin TASK_ID "constraint that must survive compaction"
+
+# plan = "auto": a planner agent runs in the same loop and writes the work items, which the
+# runtime then judges before anything is dispatched. Dispatch refuses parallel for a plan the
+# rules judged sequential, and each child carries one item's writable set and acceptance.
+python -m orbuz.runtime --state-dir /absolute/path/outside/project/state \
+  plan TASK_ID --model deepseek-v4-pro --base-url https://api.deepseek.com
+python -m orbuz.runtime --state-dir /absolute/path/outside/project/state dispatch TASK_ID
 python -m orbuz.runtime --state-dir /absolute/path/outside/project/state \
   retry TASK_ID --model deepseek-v4-flash --base-url https://api.deepseek.com
 ```
@@ -166,7 +173,10 @@ in parallel: writable sets must be disjoint, no two items may share one objectiv
 evidence, every slice an item reads must exist in the task's `slices` catalog, and no item's
 acceptance may name another item's writable output. A plan that fails any of these still runs -
 sequentially - and the reasons are recorded on the contract. A contract with no `plan` is one
-agent, which is the default.
+agent, which is the default. `plan: "auto"` declares no items up front: a planner agent produces
+them at run time (same loop, sandbox and journal), the same rules judge the result, and only then
+may anything be dispatched. The produced plan, its judge verdict and its digest are recorded on
+the task, so a plan cannot be swapped after the fact without the evidence going stale.
 
 `heldout` is a second argv run after a visible pass, with `heldout_assets` (one directory,
 outside the repository) mounted read-only at `/heldout`. A visible pass plus a held-out
