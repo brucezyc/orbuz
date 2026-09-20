@@ -609,7 +609,7 @@ class Runtime:
         spec = task['contract']
         report, unverified = {}, []
         for child_id in children:
-            outcome = self._reproduce_child(child_id, spec)
+            outcome = self._reproduce_child(child_id)
             report[child_id] = outcome
             if outcome['status'] == 'unverified':
                 unverified.append(child_id)
@@ -624,7 +624,14 @@ class Runtime:
             self.store.save(task)
         return summary
 
-    def _reproduce_child(self, child_id, parent_spec):
+    def _reproduce_child(self, child_id):
+        """The child's own acceptance re-derived from its patch.
+
+        The parent's held-out suite is deliberately NOT applied here: it judges the merged result,
+        and a single item that did its own job cannot pass a suite written for the whole task.
+        Reproduction answers one question - does the child's claim hold when the patch is the only
+        thing carried over - and unverified is what happens when it does not.
+        """
         child = self.store.load(child_id)
         spec, evidence = child['contract'], child.get('evidence') or {}
         if child['status'] != 'accepted' or not evidence.get('patch_path'):
@@ -646,44 +653,27 @@ class Runtime:
             'commit', '-q', '-am', 'Reproduce child ' + child_id[:8])
         visible = acceptance.run_suite(workspace, spec['acceptance'], directory / 'visible.log',
                                        timeout=spec['timeout'])
-        heldout = None
-        if acceptance.heldout_present(parent_spec):
-            heldout_root = workspace
-            if parent_spec.get('heldout_patch'):
-                staging = acceptance.stage_heldout_tree(workspace, parent_spec['heldout_patch'],
-                                                        directory / 'heldout-tree')
-                heldout_root = Path(staging['tree'])
-            heldout = acceptance.run_suite(heldout_root, parent_spec['heldout'],
-                                           directory / 'heldout.log', timeout=spec['timeout'],
-                                           assets=parent_spec.get('heldout_assets'))
         result = {'reproduced': visible.get('exit_code') == 0, 'workspace': str(workspace),
                   'revision': git(workspace, 'rev-parse', 'HEAD'),
-                  'visible_exit': visible.get('exit_code'),
-                  'heldout_exit': (heldout or {}).get('exit_code')}
-        if visible.get('exit_code') != 0:
+                  'visible_exit': visible.get('exit_code')}
+        if visible.get('exit_code') == 0:
+            result.update({'status': 'verified',
+                           'why': "the child's own acceptance passes again on a tree rebuilt from "
+                                  'its patch; the parent held-out suite judges the union, not this'})
+        else:
             result.update({'status': 'unverified',
                            'why': 'the child claimed accepted, but its acceptance does not pass '
                                   'again on a tree rebuilt from its patch'})
-        elif heldout is None:
-            result.update({'status': 'unverified',
-                           'why': 'no held-out suite declared: reproduction alone cannot settle '
-                                  'what the child did not already test'})
-        elif heldout.get('exit_code') != 0:
-            result.update({'status': 'hacking_suspected',
-                           'why': 'the child acceptance passed while the held-out suite failed'})
-        else:
-            result.update({'status': 'verified', 'why': 'acceptance and held-out suite both pass '
-                                                        'on a tree rebuilt from the patch'})
         return result
 
     def _spawn_verifier(self, task, spec, child_id, verifier_factory, max_calls):
         """One agent per unverified child. It gets the reproduced tree, never the child's log."""
         child = self.store.load(child_id)
-        recorded = ((task.get('verification') or {}).get('children', {}) or {}).get(child_id, {})
-        revision = recorded.get('revision')
+        revision = (child.get('evidence') or {}).get('revision') or (
+            (task.get('verification') or {}).get('children', {}) or {}).get(child_id, {}).get('revision')
         if not revision:
             return {'child': child_id, 'verifier': None,
-                    'why': 'no reproduced revision to hand over'}
+                    'why': 'the child recorded no revision to hand over'}
         # A fresh worktree at the reproduced revision: the tree the reproduction ran in now has
         # __pycache__ in it, and a task contract requires a clean repository.
         reproduced = self.store.root / child_id / 'verify' / 'source'

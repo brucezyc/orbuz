@@ -118,37 +118,42 @@ def test_a_child_that_did_not_finish_blocks_acceptance(project, tmp_path):
     assert 'did not finish' in rt.store.load(task)['error']
 
 
-def test_reproduction_catches_a_child_that_only_satisfied_its_own_suite(project, tmp_path):
-    """The child's acceptance passes; the parent's hidden suite disagrees. That is not verified."""
+def test_the_hidden_suite_judges_the_union_not_each_item(project, tmp_path):
+    """The child satisfies its own acceptance; the hidden suite disagrees with the union."""
     rt = Runtime(tmp_path / 'state')
     task, children = dispatched(rt, project, heldout=['/usr/bin/python3', '-B', '/heldout/check_all.py'],
                                 heldout_assets=[str(hidden(tmp_path, 'assert answer(2) == 84\n'))])
     scripts = {children[0]: good_child('answer.py', HARDCODED, 'check.py'),
                children[1]: good_child('other.py', 'OTHER = 2\n', 'check_other.py')}
-    rt.run_children(task, lambda child: scripts[child], concurrency=2)
+    result = rt.run_children(task, lambda child: scripts[child], concurrency=2)
 
+    assert result['merge']['status'] == 'hacking_suspected'      # visible passed, hidden failed
     report = rt.verify_children(task)
-    assert report['children'][children[0]]['status'] == 'hacking_suspected'
-    assert report['children'][children[1]]['status'] == 'verified'
+    assert all(entry['status'] == 'verified' for entry in report['children'].values())
     assert report['unverified'] == [] and report['verifier_count'] == 0
 
 
-def test_unverified_children_get_exactly_one_verifier_each(project, tmp_path):
-    """No held-out suite means reproduction cannot settle the claim, so a verifier is spawned."""
+def test_unsettled_claims_each_get_exactly_one_verifier(project, tmp_path):
+    """A claim whose evidence stopped reproducing is the only thing that spawns a verifier."""
     rt = Runtime(tmp_path / 'state')
     task, children = dispatched(rt, project)
     scripts = {children[0]: good_child('answer.py', GOOD, 'check.py'),
                children[1]: good_child('other.py', 'OTHER = 2\n', 'check_other.py')}
     rt.run_children(task, lambda child: scripts[child], concurrency=2)
 
+    # The recorded patch is no longer the patch that produced the claim: reproduction must refuse.
+    Path(rt.store.load(children[0])['evidence']['patch_path']).write_bytes(
+        b'--- a/answer.py\n+++ b/answer.py\n@@ -1 +1 @@\n-not the code that ran\n+something else\n')
+
     report = rt.verify_children(task)
-    assert report['unverified'] == children and report['verifier_count'] == 2
-    assert 'cannot settle' in report['children'][children[0]]['why']
+    assert report['unverified'] == [children[0]]
+    assert report['children'][children[1]]['status'] == 'verified'
+    assert report['verifier_count'] == 1
+    assert 'does not pass again' in report['children'][children[0]]['why']
 
     verdicts = Scripted([('write_file', {'path': 'verdict.json',
                                          'content': json.dumps({'reproduced': True, 'why': 'ran it'})}),
                          ('submit', {})])
     ran = rt.verify_children(task, lambda child: verdicts)
-    assert ran['verifier_count'] == 2
-    assert all(v['says'] for v in ran['verifiers'] if v.get('ran'))
-    assert rt.store.load(task)['verification']['unverified'] == children
+    assert ran['verifier_count'] == 1 and ran['verifiers'][0]['says'] is True
+    assert rt.store.load(task)['verification']['unverified'] == [children[0]]
