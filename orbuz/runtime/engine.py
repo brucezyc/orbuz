@@ -27,6 +27,8 @@ import fcntl
 import hashlib
 import json
 import re
+import shutil
+import subprocess
 import time
 import uuid
 from contextlib import contextmanager
@@ -95,6 +97,9 @@ PLAN_FILE = '.orbuz-plan.json'
 PLAN_SHAPE = ("import json;d=json.load(open('" + PLAN_FILE + "'));"
               "items=d.get('items');assert isinstance(items,list) and items,'items required';"
               "print(len(items),'planned items')")
+VERDICT_SHAPE = ("import json;d=json.load(open('verdict.json'));"
+                "assert isinstance(d.get('reproduced'), bool),'reproduced must be a boolean';"
+                "print('verdict', d['reproduced'])")
 PLANNER_RULES = (
     'Rules the runtime enforces. A plan that breaks one still runs, but SEQUENTIALLY:\n'
     "  - writable sets must be disjoint: two items writing one file cannot be judged apart\n"
@@ -424,6 +429,10 @@ class Runtime:
             if task.get('children'):
                 raise ValueError('Plan already dispatched')
             children = [self.create(self._item_contract(spec, item, max_calls)) for item in items]
+            for child_id in children:                # a child is judged by the parent's held-out
+                child = self.store.load(child_id)    # suite, so it has to know its parent
+                child['parent_task'] = task_id
+                self.store.save(child)
             task['children'] = children
             task['dispatch'] = {'mode': chosen, 'children': children, 'at': time.time()}
             self.store.save(task)
@@ -463,6 +472,228 @@ class Runtime:
                 'timeout': spec.get('timeout', 60),
                 'max_seconds': spec.get('max_seconds', 600),
                 'limits': dict(spec.get('limits') or {})}
+
+    # ---------- children: run the split, merge it, re-derive every verdict ----------
+
+    def run_children(self, task_id, model_factory, concurrency=6):
+        """Run dispatched children, then let the parent's acceptance judge the union.
+
+        Children are ordinary tasks, so they go through run() like anything else; concurrency is a
+        driver detail (each worker gets its own Runtime and its own model client). Their writable
+        sets are disjoint by the judge's rule, and that is what makes the union a merge instead of
+        a conflict. A child that did not finish is a missing piece: the union is still judged so
+        the failure is visible, but it cannot come back accepted.
+        """
+        task = self.store.load(task_id)
+        children = list(task.get('children') or [])
+        if not children:
+            raise ValueError('No dispatched children to run')
+        mode = (task.get('dispatch') or {}).get('mode') or 'parallel'
+        if mode != 'parallel':
+            raise ValueError('Children were dispatched sequentially: run them one at a time')
+
+        def one(child_id):
+            worker, model = Runtime(self.store.root), None
+            try:
+                model = model_factory(child_id)
+                return child_id, worker.run(child_id, model)['status']
+            except Exception as exc:
+                return child_id, f'{type(exc).__name__}: {exc}'[:200]
+            finally:
+                close = getattr(model, 'close', None)
+                if close:
+                    close()
+
+        started = time.monotonic()
+        outcomes = dict(ThreadPoolExecutor(max_workers=max(1, concurrency)).map(one, children))
+        merge = self._merge_children(task_id, task, children)
+        return {'task': task_id, 'mode': mode, 'children': outcomes, 'merge': merge,
+                'wall_clock_s': round(time.monotonic() - started, 1)}
+
+    def _merge_children(self, task_id, task, children):
+        """Apply every child's patch to one tree at the base revision and judge that union."""
+        spec = task['contract']
+        merged = self.store.root / task_id / 'merged'
+        if merged.exists():
+            shutil.rmtree(merged)
+        merged.mkdir(parents=True)
+        workspace = merged / 'source'
+        git(spec['repository'], 'worktree', 'add', '--detach', str(workspace), spec['base_revision'])
+        applied, missing = [], []
+        for child_id in children:
+            child = self.store.load(child_id)
+            patch_path = (child.get('evidence') or {}).get('patch_path')
+            if child['status'] != 'accepted' or not patch_path:
+                missing.append({'child': child_id, 'status': child['status']})
+                continue
+            done = subprocess.run(['git', '-C', str(workspace), 'apply', '--index', '-'],
+                                 input=Path(patch_path).read_bytes(), capture_output=True)
+            if done.returncode != 0:
+                # Two items touching one file after all. Resolving it here would be inventing
+                # evidence, so the merge records the conflict and stops claiming success.
+                missing.append({'child': child_id, 'status': 'patch_conflict',
+                                'detail': done.stderr.decode()[:200]})
+            else:
+                applied.append(child_id)
+        git(workspace, '-c', 'user.name=Orbuz Runtime', '-c', 'user.email=orbuz@localhost',
+            'commit', '-q', '--allow-empty', '-m', f'Merge of {len(applied)} children')
+        revision = git(workspace, 'rev-parse', 'HEAD')
+        visible = acceptance.run_suite(workspace, spec['acceptance'], merged / 'acceptance.log',
+                                       timeout=spec['timeout'])
+        heldout = None
+        if acceptance.heldout_present(spec):
+            heldout_root, staging = workspace, None
+            if spec.get('heldout_patch'):
+                staging = acceptance.stage_heldout_tree(workspace, spec['heldout_patch'],
+                                                        merged / 'heldout-tree')
+                heldout_root = Path(staging['tree'])
+            heldout = acceptance.run_suite(heldout_root, spec['heldout'], merged / 'heldout.log',
+                                           timeout=spec['timeout'],
+                                           assets=spec.get('heldout_assets'))
+        status = acceptance.verdict(visible, heldout)
+        if missing and status == 'accepted':
+            status = 'rejected'
+        evidence = dict(visible, revision=revision, contract_hash=digest(spec),
+                        environment=environment(), base_revision=spec['base_revision'],
+                        plan_digest=(task.get('plan') or {}).get('digest'),
+                        applied_children=applied, missing_children=missing,
+                        heldout_staging=staging if acceptance.heldout_present(spec) else None)
+        evidence['log_hash'] = hashlib.sha256(Path(visible['log_path']).read_bytes()).hexdigest()
+        patch = candidate_patch(workspace, spec['base_revision'], revision)
+        evidence['patch_path'] = str(merged / 'merged.patch')
+        Path(evidence['patch_path']).write_bytes(patch)
+        evidence['patch_hash'] = hashlib.sha256(patch).hexdigest()
+        evidence['suites'] = json.loads(acceptance.summarize(visible, heldout))
+        task['evidence'], task['heldout'], task['status'] = evidence, evidence['suites']['heldout'], status
+        task['workspace'] = str(workspace)
+        if missing:
+            task['error'] = 'children did not finish: ' + ', '.join(
+                f"{item['child']}={item['status']}" for item in missing)
+        with self.lock(task_id):
+            self.store.save(task)
+        return {'revision': revision, 'applied': applied, 'missing': missing, 'status': status,
+                'suites': evidence['suites']}
+
+    def verify_children(self, task_id, verifier_factory=None, max_calls=4):
+        """Re-derive each child's verdict from its patch, in a tree the child never touched.
+
+        Reproduction first, and it is free: rebuild a tree from the child's recorded patch, re-run
+        the child's own acceptance, then apply the *parent's* held-out suite to that same tree. A
+        child that passed its own acceptance while breaking the hidden one is hacking_suspected.
+        Only what reproduction cannot settle is counted unverified, and each unverified child gets
+        exactly one verifier agent - that count is the only thing that spawns one.
+        """
+        task = self.store.load(task_id)
+        children = list(task.get('children') or [])
+        if not children:
+            raise ValueError('No dispatched children to verify')
+        spec = task['contract']
+        report, unverified = {}, []
+        for child_id in children:
+            outcome = self._reproduce_child(child_id, spec)
+            report[child_id] = outcome
+            if outcome['status'] == 'unverified':
+                unverified.append(child_id)
+        verifiers = []
+        for child_id in unverified:
+            verifiers.append(self._spawn_verifier(task, spec, child_id, verifier_factory, max_calls))
+        summary = {'task': task_id, 'children': report, 'unverified': unverified, 'verifiers': verifiers,
+                   'verifier_count': len(verifiers)}
+        with self.lock(task_id):
+            task = self.store.load(task_id)
+            task['verification'] = summary
+            self.store.save(task)
+        return summary
+
+    def _reproduce_child(self, child_id, parent_spec):
+        child = self.store.load(child_id)
+        spec, evidence = child['contract'], child.get('evidence') or {}
+        if child['status'] != 'accepted' or not evidence.get('patch_path'):
+            return {'status': child['status'], 'reproduced': False,
+                    'why': 'child did not end accepted: ' + str(child['status'])}
+        directory = self.store.root / child_id / 'reproduce'
+        if directory.exists():
+            shutil.rmtree(directory)
+        directory.mkdir(parents=True)
+        workspace = directory / 'source'
+        git(spec['repository'], 'worktree', 'add', '--detach', str(workspace), spec['base_revision'])
+        done = subprocess.run(['git', '-C', str(workspace), 'apply', '-'],
+                              input=Path(evidence['patch_path']).read_bytes(), capture_output=True)
+        if done.returncode != 0:
+            return {'status': 'unverified', 'reproduced': False,
+                    'why': 'the recorded patch does not apply to the base revision',
+                    'detail': done.stderr.decode()[:200]}
+        git(workspace, '-c', 'user.name=Orbuz Runtime', '-c', 'user.email=orbuz@localhost',
+            'commit', '-q', '-am', 'Reproduce child ' + child_id[:8])
+        visible = acceptance.run_suite(workspace, spec['acceptance'], directory / 'visible.log',
+                                       timeout=spec['timeout'])
+        heldout = None
+        if acceptance.heldout_present(parent_spec):
+            heldout_root = workspace
+            if parent_spec.get('heldout_patch'):
+                staging = acceptance.stage_heldout_tree(workspace, parent_spec['heldout_patch'],
+                                                        directory / 'heldout-tree')
+                heldout_root = Path(staging['tree'])
+            heldout = acceptance.run_suite(heldout_root, parent_spec['heldout'],
+                                           directory / 'heldout.log', timeout=spec['timeout'],
+                                           assets=parent_spec.get('heldout_assets'))
+        result = {'reproduced': visible.get('exit_code') == 0, 'workspace': str(workspace),
+                  'visible_exit': visible.get('exit_code'),
+                  'heldout_exit': (heldout or {}).get('exit_code')}
+        if visible.get('exit_code') != 0:
+            result.update({'status': 'unverified',
+                           'why': 'the child claimed accepted, but its acceptance does not pass '
+                                  'again on a tree rebuilt from its patch'})
+        elif heldout is None:
+            result.update({'status': 'unverified',
+                           'why': 'no held-out suite declared: reproduction alone cannot settle '
+                                  'what the child did not already test'})
+        elif heldout.get('exit_code') != 0:
+            result.update({'status': 'hacking_suspected',
+                           'why': 'the child acceptance passed while the held-out suite failed'})
+        else:
+            result.update({'status': 'verified', 'why': 'acceptance and held-out suite both pass '
+                                                        'on a tree rebuilt from the patch'})
+        return result
+
+    def _spawn_verifier(self, task, spec, child_id, verifier_factory, max_calls):
+        """One agent per unverified child. It gets the reproduced tree, never the child's log."""
+        child = self.store.load(child_id)
+        workspace = ((task.get('verification') or {}).get('children', {}) or {})
+        reproduced = Path(self.store.root / child_id / 'reproduce' / 'source')
+        if not reproduced.is_dir():
+            return {'child': child_id, 'verifier': None, 'why': 'no reproduced tree to hand over'}
+        goal = ('Verify one claim independently. A worker says its item is done; your job is to try '
+                'to break that claim, not to agree with it.\n\n## The overall goal\n'
+                + spec['goal'] + '\n\n## The item the worker claims to have finished\n'
+                + str(child['contract']['writable']) + '\n\n## What reproduction already found\n'
+                + json.dumps((task.get('verification') or {}).get('children', {}).get(child_id, {}),
+                             ensure_ascii=False)[:600]
+                + '\n\nWrite verdict.json with {"reproduced": true|false, "why": "..."} - true only '
+                  'if you can show the claim holds by running something yourself.')
+        contract = {'goal': goal, 'repository': str(reproduced), 'writable': ['verdict.json'],
+                    'context': [], 'acceptance': ['/usr/bin/python3', '-B', '-c', VERDICT_SHAPE],
+                    'max_calls': max_calls, 'max_output_tokens': 4096, 'timeout': 60,
+                    'max_seconds': 600, 'limits': {'max_steps': 12, 'keep_recent': 8, 'pin_first': 2}}
+        verifier_id = self.create(contract)
+        if verifier_factory is None:
+            return {'child': child_id, 'verifier': verifier_id, 'ran': False}
+        model = verifier_factory(child_id)
+        try:
+            outcome = self.run(verifier_id, model)
+        finally:
+            close = getattr(model, 'close', None)
+            if close:
+                close()
+        verdict = {}
+        artifact = Path(outcome.get('workspace') or '.') / 'verdict.json'
+        try:
+            verdict = json.loads(artifact.read_text())
+        except Exception:
+            verdict = {}
+        return {'child': child_id, 'verifier': verifier_id, 'ran': True,
+                'status': outcome['status'], 'verdict': verdict,
+                'says': bool(verdict.get('reproduced'))}
 
     # ---------- steps ----------
 
