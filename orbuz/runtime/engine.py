@@ -110,6 +110,24 @@ PLANNER_RULES = (
 )
 
 
+def _worktree(repository, workspace, revision):
+    """A fresh detached worktree, or git's own reason for refusing.
+
+    A reproduction path is re-created on every verification pass, and a directory that was removed
+    while git still had it registered makes `worktree add` fail with a bare exit 128 - which says
+    nothing. Prune first, and if it still fails, raise git's words instead of an exit code.
+    """
+    workspace.parent.mkdir(parents=True, exist_ok=True)
+    subprocess.run(['git', '-C', str(repository), 'worktree', 'prune'],
+                   capture_output=True, text=True)
+    done = subprocess.run(['git', '-C', str(repository), 'worktree', 'add', '--detach',
+                           str(workspace), revision], capture_output=True, text=True)
+    if done.returncode != 0:
+        raise RuntimeError('worktree add failed for ' + str(workspace) + ': '
+                           + (done.stderr or '').strip()[:300])
+    return workspace
+
+
 class Runtime:
     def __init__(self, state_dir):
         self.store = Store(state_dir)
@@ -519,7 +537,7 @@ class Runtime:
             shutil.rmtree(merged)
         merged.mkdir(parents=True)
         workspace = merged / 'source'
-        git(spec['repository'], 'worktree', 'add', '--detach', str(workspace), spec['base_revision'])
+        _worktree(spec['repository'], workspace, spec['base_revision'])
         applied, missing = [], []
         for child_id in children:
             child = self.store.load(child_id)
@@ -617,7 +635,7 @@ class Runtime:
             shutil.rmtree(directory)
         directory.mkdir(parents=True)
         workspace = directory / 'source'
-        git(spec['repository'], 'worktree', 'add', '--detach', str(workspace), spec['base_revision'])
+        _worktree(spec['repository'], workspace, spec['base_revision'])
         done = subprocess.run(['git', '-C', str(workspace), 'apply', '-'],
                               input=Path(evidence['patch_path']).read_bytes(), capture_output=True)
         if done.returncode != 0:
