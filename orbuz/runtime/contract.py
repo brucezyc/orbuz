@@ -58,7 +58,8 @@ def validate(spec):
     spec = dict(spec)
     allowed = {'goal', 'repository', 'writable', 'context', 'acceptance',
                'max_calls', 'max_output_tokens', 'timeout', 'max_seconds',
-               'heldout', 'heldout_assets', 'heldout_patch', 'limits', 'prices'}
+               'heldout', 'heldout_assets', 'heldout_patch', 'limits', 'prices',
+               'plan', 'slices'}
     if set(spec) - allowed:
         raise ValueError('Unknown contract fields')
     if not isinstance(spec.get('goal'), str) or not spec['goal'].strip() or len(spec['goal']) > 16000:
@@ -103,6 +104,8 @@ def validate(spec):
             resolved = (repo / candidate).resolve()
             if resolved.is_relative_to(repo) and resolved.relative_to(repo).as_posix() in spec['writable']:
                 raise ValueError('Acceptance entry point cannot be writable')
+    from .plan import attach                     # deferred: plan.py reads this module's helpers
+    spec = attach(spec, repo)
     for key, default, maximum in [('max_calls', 12, 100), ('max_output_tokens', 2048, 16384)]:
         n = spec.setdefault(key, default)
         if type(n) is not int or not 1 <= n <= maximum:

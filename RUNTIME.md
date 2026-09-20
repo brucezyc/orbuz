@@ -146,6 +146,11 @@ Example contract (repository must already exist and be committed):
   "acceptance": ["/usr/bin/python3", "-B", "check.py"],
   "heldout": ["/usr/bin/python3", "-B", "/heldout/check_all.py"],
   "heldout_assets": ["/absolute/path/to/hidden/dir"],
+  "slices": {"diff": ["sympy/parsing/sympy_parser.py"], "tests": ["sympy/parsing/tests"]},
+  "plan": [{"id": "parser", "objective": "fix the parse of leading zeros",
+            "writable": ["sympy/parsing/sympy_parser.py"],
+            "acceptance": ["/usr/bin/python3", "-m", "pytest", "-q", "sympy/parsing/tests"],
+            "slices": ["diff", "tests"]}],
   "max_calls": 8,
   "max_output_tokens": 2048,
   "timeout": 10,
@@ -155,6 +160,13 @@ Example contract (repository must already exist and be committed):
   "prices": {"input": 0.28, "output": 0.42}
 }
 ```
+
+`plan` and `slices` describe how the work may split, and the runtime decides whether it may run
+in parallel: writable sets must be disjoint, no two items may share one objective over the same
+evidence, every slice an item reads must exist in the task's `slices` catalog, and no item's
+acceptance may name another item's writable output. A plan that fails any of these still runs -
+sequentially - and the reasons are recorded on the contract. A contract with no `plan` is one
+agent, which is the default.
 
 `heldout` is a second argv run after a visible pass, with `heldout_assets` (one directory,
 outside the repository) mounted read-only at `/heldout`. A visible pass plus a held-out
