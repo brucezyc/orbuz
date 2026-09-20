@@ -657,6 +657,7 @@ class Runtime:
                                            directory / 'heldout.log', timeout=spec['timeout'],
                                            assets=parent_spec.get('heldout_assets'))
         result = {'reproduced': visible.get('exit_code') == 0, 'workspace': str(workspace),
+                  'revision': git(workspace, 'rev-parse', 'HEAD'),
                   'visible_exit': visible.get('exit_code'),
                   'heldout_exit': (heldout or {}).get('exit_code')}
         if visible.get('exit_code') != 0:
@@ -678,10 +679,17 @@ class Runtime:
     def _spawn_verifier(self, task, spec, child_id, verifier_factory, max_calls):
         """One agent per unverified child. It gets the reproduced tree, never the child's log."""
         child = self.store.load(child_id)
-        workspace = ((task.get('verification') or {}).get('children', {}) or {})
-        reproduced = Path(self.store.root / child_id / 'reproduce' / 'source')
-        if not reproduced.is_dir():
-            return {'child': child_id, 'verifier': None, 'why': 'no reproduced tree to hand over'}
+        recorded = ((task.get('verification') or {}).get('children', {}) or {}).get(child_id, {})
+        revision = recorded.get('revision')
+        if not revision:
+            return {'child': child_id, 'verifier': None,
+                    'why': 'no reproduced revision to hand over'}
+        # A fresh worktree at the reproduced revision: the tree the reproduction ran in now has
+        # __pycache__ in it, and a task contract requires a clean repository.
+        reproduced = self.store.root / child_id / 'verify' / 'source'
+        if reproduced.exists():
+            shutil.rmtree(reproduced)
+        _worktree(spec['repository'], reproduced, revision)
         goal = ('Verify one claim independently. A worker says its item is done; your job is to try '
                 'to break that claim, not to agree with it.\n\n## The overall goal\n'
                 + spec['goal'] + '\n\n## The item the worker claims to have finished\n'

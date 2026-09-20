@@ -122,7 +122,7 @@ def test_reproduction_catches_a_child_that_only_satisfied_its_own_suite(project,
     """The child's acceptance passes; the parent's hidden suite disagrees. That is not verified."""
     rt = Runtime(tmp_path / 'state')
     task, children = dispatched(rt, project, heldout=['/usr/bin/python3', '-B', '/heldout/check_all.py'],
-                                heldout_assets=[str(hidden(tmp_path, 'assert answer(0) == 0\n'))])
+                                heldout_assets=[str(hidden(tmp_path, 'assert answer(2) == 84\n'))])
     scripts = {children[0]: good_child('answer.py', HARDCODED, 'check.py'),
                children[1]: good_child('other.py', 'OTHER = 2\n', 'check_other.py')}
     rt.run_children(task, lambda child: scripts[child], concurrency=2)
