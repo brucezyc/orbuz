@@ -35,6 +35,7 @@ from pathlib import Path
 from orbuz.runtime import accept as acceptance
 from orbuz.runtime import context as context_mod
 from orbuz.runtime import pinning
+from orbuz.runtime import plan as plan_mod
 from orbuz.runtime.budget import DEGRADE_ORDER, Budget, Limits, PrefixGuard
 from orbuz.runtime.contract import candidate_patch, digest, environment, git, git_paths, source_path, validate
 from orbuz.runtime.journal import CAPPED, COMPLETE, FAILED, UNKNOWN, Journal
@@ -88,6 +89,19 @@ SYSTEM_PROMPT = (
     'change that addresses the issue, then submit. A rejected candidate is information; a run that '
     'ends without one is not. Do not weaken or bypass tests. Repository facts can be investigated '
     'with list_files/read_file/command/restore_file.')
+
+
+PLAN_FILE = '.orbuz-plan.json'
+PLAN_SHAPE = ("import json;d=json.load(open('" + PLAN_FILE + "'));"
+              "items=d.get('items');assert isinstance(items,list) and items,'items required';"
+              "print(len(items),'planned items')")
+PLANNER_RULES = (
+    'Rules the runtime enforces. A plan that breaks one still runs, but SEQUENTIALLY:\n'
+    "  - writable sets must be disjoint: two items writing one file cannot be judged apart\n"
+    "  - no two items may share one objective over the same slices: that is one item bought twice\n"
+    "  - every item needs its own acceptance argv\n"
+    "  - no acceptance may name another item's writable output: that item has to wait for it"
+)
 
 
 class Runtime:
@@ -335,6 +349,120 @@ class Runtime:
                 attempt['finished_at'] = time.time()
                 self.store.save(task)
             return self.store.load(task_id)
+
+    # ---------- plan and dispatch: the planner is a role, not a bigger prompt ----------
+
+    def plan(self, task_id, model, max_calls=4, max_steps=12):
+        """Ask a planner agent for the work split, then let the rules decide how it may run.
+
+        The planner runs in the same loop, sandbox and journal as any other agent; only its
+        deliverable differs, a plan instead of a patch. Its plan is not trusted: the rules in
+        plan.py decide parallel or sequential, and a plan that breaks one is recorded with the
+        reasons instead of being quietly retried into shape.
+        """
+        with self.lock(task_id):
+            task = self.store.load(task_id)
+            spec = task['contract']
+            if spec.get('plan') != 'auto':
+                raise ValueError('This task does not ask for a plan: contract plan is not "auto"')
+            if task.get('plan'):
+                raise ValueError('Task already has a plan')
+            planner_id = self.create(self._planner_contract(spec, max_calls, max_steps))
+            task['planner_task'] = planner_id
+            self.store.save(task)
+        outcome = self.run(planner_id, model)
+        artifact = Path(outcome.get('workspace') or '.') / PLAN_FILE
+        result = {'task': task_id, 'planner_task': planner_id, 'planner_status': outcome['status'],
+                  'planner_artifact': str(artifact), 'planner_budget': outcome.get('budget')}
+        with self.lock(task_id):
+            task = self.store.load(task_id)
+            if outcome['status'] != 'accepted':
+                task['plan'] = {'status': 'planner_failed', 'planner_task': planner_id,
+                                'reason': f"planner ended {outcome['status']}",
+                                'artifact': str(artifact)}
+                self.store.save(task)
+                raise RuntimeError(f"planner task {planner_id} ended {outcome['status']}: no plan")
+            try:
+                produced = json.loads(artifact.read_text())
+                checked = plan_mod.attach({'writable': spec['writable'], 'slices': spec['slices'],
+                                           'plan': produced.get('items')},
+                                          Path(spec['repository']))
+            except Exception as exc:
+                task['plan'] = {'status': 'planner_invalid', 'planner_task': planner_id,
+                                'reason': f'{type(exc).__name__}: {exc}'[:400],
+                                'artifact': str(artifact)}
+                self.store.save(task)
+                raise RuntimeError(f'planner produced an unusable plan: {exc}') from None
+            task['plan'] = {'status': 'judged', 'planner_task': planner_id,
+                            'items': checked['plan'], 'dispatch': checked['dispatch'],
+                            'digest': digest({'plan': checked['plan']}), 'artifact': str(artifact)}
+            self.store.save(task)
+            result.update({'status': 'judged', 'items': len(checked['plan']),
+                           'dispatch': checked['dispatch'], 'plan_digest': task['plan']['digest']})
+        return result
+
+    def dispatch(self, task_id, mode=None, max_calls=None):
+        """Child tasks from a judged plan. Parallel only when the rules allowed parallel.
+
+        Each child gets the item's own writable set and acceptance; the held-out suite is
+        deliberately not inherited, because it judges the merged result, not one item of it.
+        """
+        with self.lock(task_id):
+            task = self.store.load(task_id)
+            spec = task['contract']
+            plan = task.get('plan') or {}
+            items = plan.get('items') or []
+            if not items:
+                raise ValueError('No judged plan to dispatch: run plan first')
+            verdict = plan.get('dispatch') or {}
+            chosen = mode or verdict.get('mode')
+            if chosen not in ('parallel', 'sequential'):
+                raise ValueError('Unknown dispatch mode: ' + str(chosen))
+            if chosen == 'parallel' and verdict.get('mode') != 'parallel':
+                raise ValueError('Plan was judged sequential: '
+                                 + '; '.join(verdict.get('reasons') or []))
+            if task.get('children'):
+                raise ValueError('Plan already dispatched')
+            children = [self.create(self._item_contract(spec, item, max_calls)) for item in items]
+            task['children'] = children
+            task['dispatch'] = {'mode': chosen, 'children': children, 'at': time.time()}
+            self.store.save(task)
+        return {'task': task_id, 'mode': chosen, 'verdict': verdict.get('mode'),
+                'children': children}
+
+    def _planner_contract(self, spec, max_calls, max_steps):
+        """The planner's own contract: same repo, same loop, one different deliverable."""
+        slices = '\n'.join(f'  - {name}: ' + ', '.join(paths)
+                            for name, paths in spec['slices'].items())
+        goal = ('Plan this task as work items the runtime may run in parallel.\n\n'
+                '## Goal\n' + spec['goal'] + '\n\n'
+                '## Files an item may write (nothing else is allowed)\n'
+                + '\n'.join('  - ' + name for name in spec['writable']) + '\n\n'
+                '## Evidence slices you may hand to items (use these names)\n' + slices + '\n\n'
+                '## ' + PLANNER_RULES + '\n\n'
+                '## Output\nWrite ' + PLAN_FILE + ' as JSON: '
+                '{"items": [{"id": ..., "objective": ..., "writable": [...], '
+                '"acceptance": [...argv...], "slices": [...]}, ...]}\n'
+                'List the work in the order you would do it. Fewer genuinely independent items '
+                'beat many, and an item that cannot be judged on its own is not independent.')
+        return {'goal': goal, 'repository': spec['repository'], 'writable': [PLAN_FILE],
+                'context': [], 'acceptance': ['/usr/bin/python3', '-B', '-c', PLAN_SHAPE],
+                'max_calls': max_calls, 'max_output_tokens': 4096, 'timeout': 60,
+                'max_seconds': 600, 'limits': {'max_steps': max_steps, 'keep_recent': 8,
+                                               'pin_first': 2}}
+
+    def _item_contract(self, spec, item, max_calls):
+        goal = (spec['goal'] + '\n\n## Your item\n' + item['objective'] + '\n\n'
+                'Evidence to work from: ' + ', '.join(item['slices']) + '\n'
+                'Write only: ' + ', '.join(item['writable']))
+        return {'goal': goal, 'repository': spec['repository'],
+                'writable': list(item['writable']), 'context': [],
+                'acceptance': list(item['acceptance']),
+                'max_calls': max_calls or spec['max_calls'],
+                'max_output_tokens': spec.get('max_output_tokens', 4096),
+                'timeout': spec.get('timeout', 60),
+                'max_seconds': spec.get('max_seconds', 600),
+                'limits': dict(spec.get('limits') or {})}
 
     # ---------- steps ----------
 

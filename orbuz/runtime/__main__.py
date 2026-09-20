@@ -20,6 +20,14 @@ def main():
         run.add_argument('--model', required=True)
         run.add_argument('--base-url', required=True)
         run.add_argument('--key-env', default='DEEPSEEK_API_KEY')
+    plan_cmd = sub.add_parser('plan')
+    plan_cmd.add_argument('task_id')
+    plan_cmd.add_argument('--model', required=True)
+    plan_cmd.add_argument('--base-url', required=True)
+    plan_cmd.add_argument('--key-env', default='DEEPSEEK_API_KEY')
+    dispatch = sub.add_parser('dispatch')
+    dispatch.add_argument('task_id')
+    dispatch.add_argument('--mode', choices=['parallel', 'sequential'])
     for action in ('status', 'verify', 'cancel', 'steps'):
         sub.add_parser(action).add_argument('task_id')
     pin = sub.add_parser('pin')
@@ -34,6 +42,11 @@ def main():
         elif args.action in ('run', 'retry'):
             model = ChatModel(args.model, args.base_url, args.key_env)
             result = rt.run(args.task_id, model, retry=args.action == 'retry')
+        elif args.action == 'plan':
+            model = ChatModel(args.model, args.base_url, args.key_env)
+            result = rt.plan(args.task_id, model)
+        elif args.action == 'dispatch':
+            result = rt.dispatch(args.task_id, mode=args.mode)
         elif args.action == 'cancel':
             rt.cancel(args.task_id)
             result = rt.status(args.task_id)
@@ -48,9 +61,9 @@ def main():
             result = rt.status(args.task_id)
             result['journal'] = rt.journal.steps(args.task_id)
         print(json.dumps(result, indent=2, ensure_ascii=False))
-        if args.action in ('run', 'retry', 'verify') and result['status'] != 'accepted':
-            return 1
-        return 0
+        failed = ((args.action in ('run', 'retry', 'verify') and result['status'] != 'accepted')
+                  or (args.action == 'plan' and result.get('status') != 'judged'))
+        return 1 if failed else 0
     except Exception as exc:
         print(json.dumps({'status': 'error', 'error': str(exc)}))
         return 2

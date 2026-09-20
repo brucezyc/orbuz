@@ -134,6 +134,12 @@ def attach(spec, repo):
     if 'plan' not in spec:
         raise ValueError('slices without a plan dispatch nothing')
     spec['slices'] = _catalog(repo, spec)
+    if spec['plan'] == 'auto':
+        # The items do not exist yet: a planner produces them at run time and the same rules
+        # judge them then. Deferred is recorded rather than assumed to be parallel.
+        spec['dispatch'] = {'mode': 'deferred',
+                            'reasons': ['plan = auto: a planner agent produces the items at run time']}
+        return spec
     spec['plan'] = _items(repo, spec, spec['slices'])
     spec['dispatch'] = judge(spec['plan'])
     return spec
