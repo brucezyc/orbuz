@@ -120,6 +120,12 @@ python -m orbuz.runtime --state-dir /absolute/path/outside/project/state \
 python -m orbuz.runtime --state-dir /absolute/path/outside/project/state \
   plan TASK_ID --model deepseek-v4-pro --base-url https://api.deepseek.com
 python -m orbuz.runtime --state-dir /absolute/path/outside/project/state dispatch TASK_ID
+
+# Run the split (one worktree per child, the parent's acceptance and held-out suite judging the
+# merged union), then re-derive every child's verdict from its own patch.
+python -m orbuz.runtime --state-dir /absolute/path/outside/project/state \
+  run-children TASK_ID --model deepseek-v4-flash --base-url https://api.deepseek.com
+python -m orbuz.runtime --state-dir /absolute/path/outside/project/state verify-children TASK_ID
 python -m orbuz.runtime --state-dir /absolute/path/outside/project/state \
   retry TASK_ID --model deepseek-v4-flash --base-url https://api.deepseek.com
 ```
@@ -176,7 +182,15 @@ sequentially - and the reasons are recorded on the contract. A contract with no 
 agent, which is the default. `plan: "auto"` declares no items up front: a planner agent produces
 them at run time (same loop, sandbox and journal), the same rules judge the result, and only then
 may anything be dispatched. The produced plan, its judge verdict and its digest are recorded on
-the task, so a plan cannot be swapped after the fact without the evidence going stale.
+the task, so a plan cannot be swapped after the fact without the evidence going stale. Children run
+through the same loop, each in its own worktree; the judge's disjointness rule is what makes the
+union a merge instead of a conflict, and the parent's acceptance plus held-out suite judge that
+merged tree - a child that satisfies its own acceptance while the union breaks the hidden suite
+comes back `hacking_suspected`. `verify-children` re-derives each child's verdict from its recorded
+patch in a fresh worktree, against the child's own acceptance only (the hidden suite is written for
+the whole task, so one honest item cannot pass it), and a claim whose recorded evidence no longer
+reproduces it is counted unverified and gets exactly one verifier agent. A child that did not
+finish leaves the merge unable to claim success.
 
 `heldout` is a second argv run after a visible pass, with `heldout_assets` (one directory,
 outside the repository) mounted read-only at `/heldout`. A visible pass plus a held-out
