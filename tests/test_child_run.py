@@ -150,7 +150,7 @@ def test_unsettled_claims_each_get_exactly_one_verifier(project, tmp_path):
     assert report['unverified'] == [children[0]]
     assert report['children'][children[1]]['status'] == 'verified'
     assert report['verifier_count'] == 1
-    assert 'does not pass again' in report['children'][children[0]]['why']
+    assert 'does not apply' in report['children'][children[0]]['why']
 
     verdicts = Scripted([('write_file', {'path': 'verdict.json',
                                          'content': json.dumps({'reproduced': True, 'why': 'ran it'})}),
